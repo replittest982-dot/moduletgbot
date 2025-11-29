@@ -54,31 +54,24 @@ async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     
-    # --- 1. ФИКС: Использование замыканий для startup/shutdown ---
-    # Функции on_startup и on_shutdown определены внутри main, 
-    # чтобы иметь доступ к db, tm, config и ADMIN_ID через замыкание.
-    
+    # Использование замыканий для доступа к db, tm и config
     async def on_startup(bot: Bot):
         """Выполняется при запуске бота."""
         await db.init() 
-        # Доступ к ADMIN_ID через замыкание
         await set_commands.set_my_commands(bot, ADMIN_ID) 
         logger.info("✅ Bot, DB, and Commands ready")
 
     async def on_shutdown(bot: Bot):
         """Выполняется при остановке бота."""
-        # Доступ к db через замыкание
         await db.close()
         logger.info("❌ Database connection closed. Bot stopped.")
 
-    # --- 2. ФИКС: Правильная регистрация startup/shutdown ---
-    # Теперь регистрируем без лишних аргументов, используя правильную сигнатуру
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    # --- 3. ФИКС: Правильная регистрация middleware ---
+    # Правильная регистрация middleware
     middleware = DependencyMiddleware(db=db, tm=tm, bot=bot, config=config)
-    dp.update.middleware(middleware) # ✅ Использовано dp.update.middleware
+    dp.update.middleware(middleware) 
     
     dp.include_router(user_router)
     dp.include_router(admin_router)
