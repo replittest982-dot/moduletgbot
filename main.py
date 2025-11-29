@@ -5,8 +5,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.middlewares.base import BaseMiddleware 
 
-from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR, TARGET_CHANNEL_URL, SUPPORT_BOT_USERNAME
-# ✅ ИСПРАВЛЕНО: Удален drop_router из импорта
+from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR, TARGET_CHANNEL_URL, SUPPORT_BOT_USERNAME, QR_TIMEOUT
+# Импорт роутеров, которые теперь корректно экспортируются
 from handlers import user_router, admin_router 
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
@@ -46,6 +46,8 @@ async def main():
         TEMP_DIR = TEMP_DIR 
         TARGET_CHANNEL_URL = TARGET_CHANNEL_URL
         SUPPORT_BOT_USERNAME = SUPPORT_BOT_USERNAME
+        QR_TIMEOUT = QR_TIMEOUT
+        
     config = Config()
 
     tm = TelethonManager(db, config)
@@ -63,7 +65,7 @@ async def main():
     
     dp.include_router(user_router)
     dp.include_router(admin_router)
-    # ❌ ИСПРАВЛЕНО: drop_router больше не включается
+    # drop_router не включается, так как его функционал не реализован
     
     logger.info("Bot is starting...")
     await dp.start_polling(bot) 
