@@ -37,8 +37,7 @@ class RateLimitMiddleware(BaseMiddleware):
         now = asyncio.get_event_loop().time()
         if uid in self.last_request and now - self.last_request[uid] < self.limit: return 
         self.last_request[uid] = now
-        # 🟢 Внедряем зависимости в data (или kwargs), чтобы они были доступны в обработчиках
-        data.update(user_router.kwargs) 
+        # 🟢 Middleware исправлена: больше нет ошибочной попытки внедрить зависимости
         return await handler(event, data)
 
 def get_user_id_from_update(update: Update) -> Optional[int]:
@@ -58,7 +57,7 @@ def check_valid_phone(phone: str) -> Optional[str]:
 
 @user_router.message(Command("start"))
 async def cmd_start(message: Message, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs, которые передал Aiogram
     db = kwargs.get('db')
     tm = kwargs.get('tm')
     store = kwargs.get('store')
@@ -206,8 +205,6 @@ async def process_promo_code(message: Message, state: FSMContext, **kwargs):
 
     code = message.text.strip().upper() 
     
-    # ⚠️ Улучшение UX: state.clear() перенесено ниже, чтобы пользователь мог исправить ошибку
-    
     success, result_msg = await db.apply_promo_code(message.from_user.id, code)
     
     await message.answer(result_msg, parse_mode='Markdown')
@@ -216,7 +213,6 @@ async def process_promo_code(message: Message, state: FSMContext, **kwargs):
         await state.clear()
         await message.answer("Для запуска воркера используйте команду /login.")
     else:
-        # Если ошибка, не сбрасываем состояние, чтобы пользователь мог ввести код снова
         await message.answer("Попробуйте ввести другой код или введите /promo для отмены.")
 
 
@@ -258,8 +254,6 @@ async def process_create_promo(message: Message, state: FSMContext, **kwargs):
     db = kwargs.get('db')
 
     if message.from_user.id != ADMIN_ID: return
-    
-    # ⚠️ Улучшение UX: state.clear() перенесено ниже
     
     parts = message.text.split()
     if len(parts) != 3:
