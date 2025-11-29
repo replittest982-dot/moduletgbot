@@ -42,60 +42,64 @@ class AsyncDatabase:
     async def init(self):
         """Инициализирует подключение к БД и создает таблицы, если они не существуют."""
         if self.conn is None:
+            # 1. Создаем соединение
             self.conn = await aiosqlite.connect(self.db_path) 
-            self.conn.row_factory = aiosqlite.Row # Установка row_factory для доступа по имени
+            self.conn.row_factory = aiosqlite.Row 
             
-        async with self.conn:
-            # 1. Таблица Users
-            await self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    telethon_active INTEGER DEFAULT 0, -- 0: inactive, 1: authorized, 2: running
-                    session_str TEXT, 
-                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
-                )
-            """)
-            # 2. Таблица Subscriptions
-            await self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    user_id INTEGER PRIMARY KEY, 
-                    end_date TEXT, 
-                    is_admin_sub INTEGER DEFAULT 0, -- 1, если подписка выдана админом
-                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-                )
-            """)
-            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_user_id ON subscriptions (user_id)")
-            
-            # 3. Таблица Promo Codes
-            await self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS promo_codes (
-                    code TEXT PRIMARY KEY, 
-                    days INTEGER NOT NULL, 
-                    max_uses INTEGER NOT NULL, 
-                    used_count INTEGER DEFAULT 0
-                )
-            """)
-            
-            # 4. Таблица Drop Sessions (для привязки ПК)
-            await self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS drop_sessions (
-                    user_id INTEGER PRIMARY KEY, 
-                    pc_name TEXT UNIQUE, 
-                    phone TEXT,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-                )
-            """)
-            
-            # 5. Таблица Temp Sessions (для хранения временных данных авторизации)
-            await self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS temp_sessions (
-                    user_id INTEGER PRIMARY KEY, 
-                    phone TEXT, 
-                    qr_login_data TEXT,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-                )
-            """)
-            await self.conn.commit()
+        # ❌ УДАЛЕНО: async with self.conn:
+        # ✅ ИСПОЛЬЗУЕМ ПРЯМОЕ ВЫПОЛНЕНИЕ КОМАНД:
+        
+        # 1. Таблица Users
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                telethon_active INTEGER DEFAULT 0, 
+                session_str TEXT, 
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+            )
+        """)
+        # 2. Таблица Subscriptions
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id INTEGER PRIMARY KEY, 
+                end_date TEXT, 
+                is_admin_sub INTEGER DEFAULT 0, 
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+        """)
+        await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_user_id ON subscriptions (user_id)")
+        
+        # 3. Таблица Promo Codes
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY, 
+                days INTEGER NOT NULL, 
+                max_uses INTEGER NOT NULL, 
+                used_count INTEGER DEFAULT 0
+            )
+        """)
+        
+        # 4. Таблица Drop Sessions
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS drop_sessions (
+                user_id INTEGER PRIMARY KEY, 
+                pc_name TEXT UNIQUE, 
+                phone TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+        """)
+        
+        # 5. Таблица Temp Sessions
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS temp_sessions (
+                user_id INTEGER PRIMARY KEY, 
+                phone TEXT, 
+                qr_login_data TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+        """)
+        await self.conn.commit()
+
 
     async def close(self):
         """Закрывает подключение к БД."""
@@ -121,7 +125,6 @@ class AsyncDatabase:
             await self.conn.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
             await self.conn.commit()
         except aiosqlite.IntegrityError:
-            # Пользователь уже существует
             pass
         except Exception as e:
             logger.error(f"Error adding user {user_id}: {e}")
@@ -148,7 +151,6 @@ class AsyncDatabase:
         Проверяет статус подписки пользователя.
         Возвращает (is_subscribed: bool, status_text: str).
         """
-        # Если пользователь является админом, у него всегда активна подписка
         if user_id == admin_id:
             return True, "✅ Активна (Админ)"
 
@@ -161,7 +163,6 @@ class AsyncDatabase:
             try:
                 end_date = parser.parse(row['end_date']).astimezone(timezone('UTC'))
             except Exception:
-                # Если дата некорректна, считаем подписку неактивной
                 return False, "❌ Не активна (ошибка даты)"
 
             if end_date > now_utc:
@@ -176,7 +177,6 @@ class AsyncDatabase:
         """Добавляет или продлевает подписку."""
         now_utc = datetime.now(timezone('UTC'))
 
-        # 1. Получаем текущую дату окончания (если она в будущем, продлеваем от нее)
         async with self.conn.execute("SELECT end_date FROM subscriptions WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
 
@@ -187,14 +187,12 @@ class AsyncDatabase:
                 if existing_date > now_utc:
                     current_end_date = existing_date
             except Exception:
-                pass # Используем now_utc, если текущая дата некорректна
+                pass 
 
-        # 2. Рассчитываем новую дату окончания
         new_end_date = current_end_date + timedelta(days=days)
         new_end_date_str = new_end_date.strftime('%Y-%m-%d %H:%M:%S')
         admin_sub_val = 1 if is_admin_sub else 0
 
-        # 3. Вставляем или обновляем
         await self.conn.execute(
             """INSERT INTO subscriptions (user_id, end_date, is_admin_sub) VALUES (?, ?, ?)
                ON CONFLICT(user_id) DO UPDATE SET end_date = excluded.end_date, is_admin_sub = excluded.is_admin_sub""",
@@ -214,7 +212,6 @@ class AsyncDatabase:
             await self.conn.commit()
             return True
         except aiosqlite.IntegrityError:
-            # Промокод уже существует
             return False
         except Exception as e:
             logger.error(f"Error creating promo code {code}: {e}")
@@ -225,7 +222,6 @@ class AsyncDatabase:
         code = code.upper()
 
         async with self.conn:
-            # 1. Проверяем существование и лимиты
             async with self.conn.execute("SELECT days, max_uses, used_count FROM promo_codes WHERE code = ?", (code,)) as cursor:
                 promo = await cursor.fetchone()
             
@@ -239,18 +235,11 @@ class AsyncDatabase:
             if max_uses != 0 and used_count >= max_uses:
                 return False, "❌ Промокод истек (достигнут лимит использований)."
 
-            # 2. Проверяем, использовал ли пользователь промокод ранее
-            # Это требует создания отдельной таблицы promo_uses, но для упрощения 
-            # мы полагаемся на то, что пользователь не будет вводить код дважды.
-
-            # 3. Обновляем счетчик использования и добавляем подписку
             try:
-                # Обновляем счетчик
                 await self.conn.execute(
                     "UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?", 
                     (code,)
                 )
-                # Добавляем подписку
                 await self.add_subscription(user_id, days, is_admin_sub=False)
                 await self.conn.commit()
 
