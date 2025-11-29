@@ -10,7 +10,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
 # --- LOCAL IMPORTS ---
-# Убедитесь, что эти файлы существуют и импортируются корректно
 from telethon_manager import TelethonManager, GlobalStorage
 from db import AsyncDatabase
 from handlers import user_router, admin_router, drop_router, RateLimitMiddleware, DependencyInjectorMiddleware
@@ -50,29 +49,23 @@ DI_DATA: Dict[str, Any] = {
 # II. STARTUP, SHUTDOWN И ЗАПУСК
 # =========================================================================
 
-async def on_startup(*args, **kwargs): # 🟢 ИСПРАВЛЕНИЕ: Принимаем *args, **kwargs для надежности
+async def on_startup(*args, **kwargs): 
     global bot 
     logger.info("Bot starting up...")
     
-    # Извлекаем зависимости
     db = kwargs.get('db')
     tm = kwargs.get('tm')
 
-    # Регистрация команд
     await set_default_commands(bot, ADMIN_ID)
     
-    # Инициализация файловой системы и БД
     os.makedirs('data', exist_ok=True)
     os.makedirs('sessions', exist_ok=True)
     
     if db:
         await db.init() 
-        
-        # Запуск активных воркеров Telethon
         active_users = await db.get_active_telethon_users() 
         for uid in active_users:
             if await db.check_subscription(uid): 
-                # Создаем задачу, не блокируя запуск бота
                 asyncio.create_task(tm.start_client_task(uid)) 
             else:
                 await db.set_telethon_status(uid, False) 
@@ -83,14 +76,12 @@ async def on_startup(*args, **kwargs): # 🟢 ИСПРАВЛЕНИЕ: Прини
             logger.info("No active Telethon workers found on startup.")
 
 
-async def on_shutdown(*args, **kwargs): # 🟢 НОВАЯ ФУНКЦИЯ для корректного закрытия сессий
+async def on_shutdown(*args, **kwargs):
     global bot
     
-    # 1. Закрытие сессии Aiogram Bot
     await bot.session.close() 
     logger.info("Bot session closed.")
     
-    # 2. Остановка всех активных Telethon клиентов (если нужно)
     tm = kwargs.get('tm')
     if tm:
         await tm.stop_all_workers()
@@ -104,7 +95,7 @@ async def main():
         logger.critical("❌ One or more essential variables are missing. Check your config.py/ .env file.")
         sys.exit(1)
 
-    # 1. РЕГИСТРАЦИЯ MIDDLEWARE ДЛЯ ВНЕДРЕНИЯ ЗАВИСИМОСТЕЙ (db, tm, store)
+    # 1. РЕГИСТРАЦИЯ MIDDLEWARE ДЛЯ ВНЕДРЕНИЯ ЗАВИСИМОСТЕЙ
     di_middleware = DependencyInjectorMiddleware(DI_DATA)
     dp.message.outer_middleware(di_middleware)
     dp.callback_query.outer_middleware(di_middleware)
@@ -121,7 +112,7 @@ async def main():
     
     # Регистрация обработчиков жизненного цикла
     dp.startup.register(on_startup) 
-    dp.shutdown.register(on_shutdown) # 🟢 РЕГИСТРАЦИЯ SHUTDOWN
+    dp.shutdown.register(on_shutdown) 
 
     try:
         bot_info = await bot.get_me()
@@ -132,7 +123,7 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Starting polling...")
-    await dp.start_polling(bot, **DI_DATA) # 🟢 ПЕРЕДАЧА DI_DATA для on_startup/shutdown
+    await dp.start_polling(bot, **DI_DATA)
 
 if __name__ == '__main__':
     if sys.platform == 'win32': 
@@ -144,3 +135,4 @@ if __name__ == '__main__':
         logger.info("Bot stopped by user (KeyboardInterrupt).")
     except Exception as e:
         logger.critical(f"Critical error in main loop: {e}", exc_info=True)
+    
