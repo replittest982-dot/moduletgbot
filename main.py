@@ -8,13 +8,14 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage 
 from aiogram.client.default import DefaultBotProperties
 
-# Импорт из локальных модулей
-from .config import BOT_TOKEN, DB_PATH, SESSIONS_DIR, DATA_DIR, TEMP_DIR, ADMIN_ID
-from .db import AsyncDatabase
-from .utils import GlobalStorage, DependencyInjectorMiddleware
-from .telethon_manager import TelethonManager
-from .handlers import user_router, admin_router, drop_router
-from .set_commands import set_default_commands
+# Импорт из локальных модулей (ИСПРАВЛЕННЫЕ АБСОЛЮТНЫЕ ИМПОРТЫ)
+# Заменено "from .config" на "from config" и т.д.
+from config import BOT_TOKEN, DB_PATH, SESSIONS_DIR, DATA_DIR, TEMP_DIR, ADMIN_ID
+from db import AsyncDatabase
+from utils import GlobalStorage, DependencyInjectorMiddleware
+from telethon_manager import TelethonManager
+from handlers import user_router, admin_router, drop_router
+from set_commands import set_default_commands
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +91,6 @@ if __name__ == "__main__":
         sys.exit(1)
         
     try:
-        # Для корректного запуска модулей (если main.py не в корне)
-        # Если вы запускаете python main.py из корня проекта,
-        # замените "from .x import y" на "from x import y"
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Bot stopped by user.")
