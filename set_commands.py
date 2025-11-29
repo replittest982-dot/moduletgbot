@@ -20,7 +20,6 @@ async def set_default_commands(bot: Bot, admin_id: int):
     admin_commands = user_commands + [
         BotCommand(command="admin", description="👑 Админ-панель"),
         BotCommand(command="create_promo", description="🔑 Создать промокод"),
-        # Здесь можно добавить другие команды, видимые только админу
     ]
     
     # Регистрируем команды только для ADMIN_ID
