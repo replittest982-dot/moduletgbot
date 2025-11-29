@@ -13,6 +13,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, QR_TIMEOUT
 
 # --- Заглушки для типов и утилит (УДАЛИТЕ И ЗАМЕНИТЕ НА РЕАЛЬНЫЕ ИМПОРТЫ!) ---
+# Если вы используете заглушки, убедитесь, что они совпадают с вашими классами
 class AsyncDatabase: 
     async def get_subscription_status(self, uid, admin_id): return (True, "Активна")
     async def get_user(self, uid): return {'telethon_active': 0}
@@ -20,6 +21,7 @@ class AsyncDatabase:
     async def apply_promo_code(self, uid, code): return (False, "❌ Промокод не найден.")
     async def create_promo_code(self, code, days, max_uses): return True
 class TelethonManager: 
+    async def start_client_task(self, uid): return True
     async def send_code(self, uid, phone): return "Код отправлен"
     async def sign_in(self, uid, code): return True, "Успех!", None
     async def sign_in_password(self, uid, password): return True, "Успех!"
@@ -203,9 +205,7 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         bio.seek(0)
     except Exception as e:
         logger.error(f"Error generating QR code image: {e}")
-        # Здесь мы не можем использовать tm.stop_worker, так как он может быть заглушкой
-        # return await callback.message.answer("❌ Ошибка при создании QR-кода. Попробуйте войти по номеру.")
-        pass # Продолжим, чтобы не вызывать ошибку, если qrcode не установлен
+        pass 
     
     photo_msg = None
     if bio.getbuffer().nbytes > 0:
@@ -218,8 +218,9 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
     data = tm.store.temp_data.get(callback.from_user.id)
     if not data:
         await state.clear()
-        if photo_msg: try: await photo_msg.delete() 
-        except Exception: pass
+        if photo_msg: # <-- ИСПРАВЛЕНО
+            try: await photo_msg.delete() 
+            except Exception: pass
         return await callback.message.answer("❌ Сессия QR-авторизации утеряна. Попробуйте снова.")
 
     try:
@@ -236,8 +237,9 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         await tm.stop_worker(callback.from_user.id, delete_session=True)
         msg = f"❌ Произошла ошибка при проверке QR: {e}"
 
-    if photo_msg: try: await photo_msg.delete() 
-    except Exception: pass
+    if photo_msg: # <-- ИСПРАВЛЕНО
+        try: await photo_msg.delete() 
+        except Exception: pass
 
     if success:
         await state.clear()
@@ -303,7 +305,6 @@ async def cb_admin(callback: CallbackQuery, **kwargs):
     if callback.from_user.id != ADMIN_ID: return
     text = (
         "👑 **Админ-Панель**\n"
-        # ИСПРАВЛЕНО: Убрано жирное форматирование, вызывавшее Bad Request
         "Создание промокода: /create_promo\n" 
         "Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`\n"
         "Пример: `/create_promo TEST 30 10`"
