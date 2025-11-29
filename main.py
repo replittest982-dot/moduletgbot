@@ -2,87 +2,60 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.client.default import DefaultBotProperties
-from aiogram.dispatcher.middlewares.base import BaseMiddleware 
-from typing import Any, Dict, Awaitable, Callable, Optional 
 
-from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR, TARGET_CHANNEL_URL, SUPPORT_BOT_USERNAME, QR_TIMEOUT
-from handlers import user_router, admin_router 
-from telethon_manager import TelethonManager
+# ✅ ИМПОРТЫ ПРОЕКТА
+from config import BOT_TOKEN, ADMIN_ID
+from handlers import user_router, admin_router, router # router включает errors_handler
 from db import AsyncDatabase
-import set_commands
+from telethon_manager import TelethonManager
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Логирование
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class DependencyMiddleware(BaseMiddleware):
-    def __init__(self, **data: Any):
-        self.data = data
-        super().__init__()
-
-    async def __call__(
-        self,
-        handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
-        event: Any,
-        data: Dict[str, Any]
-    ) -> Any:
-        # Добавляем все наши зависимости (db, tm, bot, config) в контекст data
-        data.update(self.data)
-        return await handler(event, data)
-
 async def main():
-    if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN is not set!")
-        return
-
-    db = AsyncDatabase() 
+    # --- 1. ИНИЦИАЛИЗАЦИЯ КЛЮЧЕВЫХ ОБЪЕКТОВ ---
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
     
-    class Config:
-        API_ID = API_ID
-        API_HASH = API_HASH
-        TEMP_DIR = TEMP_DIR 
-        TARGET_CHANNEL_URL = TARGET_CHANNEL_URL
-        SUPPORT_BOT_USERNAME = SUPPORT_BOT_USERNAME
-        QR_TIMEOUT = QR_TIMEOUT
-        
-    config = Config()
-
-    tm = TelethonManager(db, config)
+    db = AsyncDatabase()
+    tm = TelethonManager()
     
-    default_properties = DefaultBotProperties(parse_mode='Markdown') 
-    bot = Bot(token=BOT_TOKEN, default=default_properties)
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
+    # Инициализация подключения к БД
+    await db.init()
+    logger.info("Database initialized successfully.")
     
-    # Использование замыканий для доступа к db, tm и config
-    async def on_startup(bot: Bot):
-        """Выполняется при запуске бота."""
-        await db.init() 
-        await set_commands.set_my_commands(bot, ADMIN_ID) 
-        logger.info("✅ Bot, DB, and Commands ready")
-
-    async def on_shutdown(bot: Bot):
-        """Выполняется при остановке бота."""
-        await db.close()
-        logger.info("❌ Database connection closed. Bot stopped.")
-
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
+    # --- 2. ПЕРЕДАЧА ГЛОБАЛЬНЫХ ОБЪЕКТОВ ---
+    # Передаем объекты БД, Telethon и Admin ID в контекст диспетчера.
+    # Они будут доступны в хендлерах через аргументы `db`, `tm`, `admin_id` и `bot`.
+    dp["db"] = db
+    dp["tm"] = tm
+    dp["admin_id"] = ADMIN_ID 
     
-    # Правильная регистрация middleware
-    middleware = DependencyMiddleware(db=db, tm=tm, bot=bot, config=config)
-    dp.update.middleware(middleware) 
-    
+    # --- 3. РЕГИСТРАЦИЯ РОУТЕРОВ ---
+    # Важно: router, содержащий errors_handler, регистрируется последним (или в любом порядке, 
+    # если это роутер ошибок), но его присутствие критично.
     dp.include_router(user_router)
     dp.include_router(admin_router)
+    dp.include_router(router)
     
-    logger.info("Bot is starting...")
-    await dp.start_polling(bot) 
+    logger.info("Starting bot...")
+    
+    # --- 4. СТАРТ ПОЛЛИНГА И ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ ---
+    try:
+        # dp.start_polling запускает бота
+        await dp.start_polling(bot)
+    finally:
+        # Обязательно закрываем подключение к БД при завершении работы
+        await db.close()
+        # Закрываем сессию бота
+        await bot.session.close()
+        logger.info("Bot stopped and database connection closed.")
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main()) 
+        asyncio.run(main())
     except KeyboardInterrupt:
-        logger.warning("Bot stopped by user (KeyboardInterrupt).")
+        logger.info("Bot shutdown by user.")
     except Exception as e:
-        logger.error(f"Fatal error in main: {e}", exc_info=True)
+        logger.critical(f"Critical error during bot startup/runtime: {e}")
