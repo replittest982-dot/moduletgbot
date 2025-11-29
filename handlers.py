@@ -33,15 +33,17 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
         InlineKeyboardButton(text="Задать вопрос", url=f"https://t.me/{SUPPORT_BOT_USERNAME}")
     ])
     
-    # Логика для пользователей с подпиской (включая админа, у которого подписка всегда активна)
+    # Логика для пользователей с подпиской (включая админа)
     if is_subscribed or is_admin:
-        # Если нет активного Telethon аккаунта: показываем кнопки входа и промокод
+        
+        # 💡 ИСПРАВЛЕНИЕ: Кнопка промокода доступна всегда, если есть подписка
         if not is_telethon_active:
-            # 💡 ИСПРАВЛЕНИЕ: Кнопки входа и промокод для всех активных пользователей (включая тех, кто еще не вошел)
+            # Если нет активного Telethon аккаунта: показываем кнопки входа
             kb.append([
                 InlineKeyboardButton(text="📱 Вход по QR-коду", callback_data="auth_qr"),
                 InlineKeyboardButton(text="🔑 Вход по Номеру", callback_data="auth_phone")
             ])
+            # Кнопка промокода
             kb.append([InlineKeyboardButton(text="🎁 Активировать Промокод", callback_data="user_promo")])
         else:
             # Если есть активный Telethon аккаунт: показываем Worker и Выход
@@ -56,7 +58,7 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
                 worker_row.append(InlineKeyboardButton(text="Worker Остановлен", callback_data="info_worker"))
             
             kb.append(worker_row)
-            # 💡 ИСПРАВЛЕНИЕ: Кнопка "Промокод" теперь на верхнем уровне, если вошли
+            # Кнопка промокода и Выход
             kb.append([InlineKeyboardButton(text="🎁 Промокод", callback_data="user_promo"), InlineKeyboardButton(text="❌ Выход", callback_data="auth_logout")])
         
         # Админ-Панель только для админа
@@ -152,8 +154,7 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         return await callback.message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
         
     try:
-        # 💡 ИСПРАВЛЕНИЕ: Ожидаем только URL, т.к. "image" может отсутствовать
-        # tm.start_qr_login должен возвращать URL
+        # Ожидаем только URL
         url = await tm.start_qr_login(callback.from_user.id) 
     except Exception as e: 
         logger.error(f"QR Login start error: {e}")
@@ -330,20 +331,19 @@ async def promo_proc(message: Message, state: FSMContext, db: AsyncDatabase, bot
 @admin_router.callback_query(F.data == "admin_panel")
 async def cb_admin(callback: CallbackQuery, **kwargs):
     if callback.from_user.id != ADMIN_ID: return
-    # 💡 ИСПРАВЛЕНИЕ: Прямая подсказка по команде
-    await callback.message.answer(textwrap.dedent("""
-        **👑 Админ-Панель**
-        
-        * **Создание промокода:** `/create_promo`
-          * Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`
-          * Пример: `/create_promo TEST 30 10`
-    """), parse_mode='Markdown')
+    # 💡 ИСПРАВЛЕНИЕ: Упрощенная и корректная Markdown разметка
+    text = (
+        "**👑 Админ-Панель**\n\n"
+        "**Создание промокода:** `/create_promo`\n"
+        "Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`\n"
+        "Пример: `/create_promo TEST 30 10`"
+    )
+    await callback.message.answer(text, parse_mode='Markdown')
     await callback.answer()
 
 @admin_router.message(Command("create_promo"))
 async def cmd_mk_promo(message: Message, state: FSMContext, **kwargs):
     if message.from_user.id != ADMIN_ID: return
-    # 💡 ИСПРАВЛЕНИЕ: Не переводим в FSM, а обрабатываем команду сразу (удобнее для админа)
     
     parts = message.text.split()
     if len(parts) != 4: 
