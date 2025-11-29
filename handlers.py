@@ -10,7 +10,10 @@ from aiogram.types import Update, Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.filters.state import StateFilter
+# 🟢 ИСПРАВЛЕНО: Добавлены импорты для FSM
+from aiogram.fsm.state import StatesGroup, State 
 
+# --- LOCAL IMPORTS ---
 from telethon_manager import SESSION_DIR, TelethonAuth 
 from config import ADMIN_ID
 
@@ -23,16 +26,30 @@ drop_router = Router(name="drop_router")
 
 # --- MIDDLEWARE & HELPERS ---
 class RateLimitMiddleware(BaseMiddleware):
-    # ... (Оставлено как в предыдущем ответе) ...
-    pass 
+    def __init__(self, store, limit=0.5):
+        self.store = store
+        self.limit = limit
+        self.last_request: Dict[int, float] = {} 
+        super().__init__()
+
+    async def __call__(self, handler, event: Update, data):
+        uid = get_user_id_from_update(event) 
+        if uid is None: return await handler(event, data)
+        now = asyncio.get_event_loop().time()
+        if uid in self.last_request and now - self.last_request[uid] < self.limit: return 
+        self.last_request[uid] = now
+        return await handler(event, data)
 
 def get_user_id_from_update(update: Update) -> Optional[int]:
-    # ... (Оставлено как в предыдущем ответе) ...
-    pass
+    if hasattr(update, 'from_user') and update.from_user: return update.from_user.id
+    if hasattr(update, 'message') and update.message and update.message.from_user: return update.message.from_user.id
+    if hasattr(update, 'callback_query') and update.callback_query and update.callback_query.from_user: return update.callback_query.from_user.id
+    return None
 
 def check_valid_phone(phone: str) -> Optional[str]:
-    # ... (Оставлено как в предыдущем ответе) ...
-    pass
+    phone = re.sub(r'[^\d+]', '', phone) 
+    if re.fullmatch(r'^\+\d{10,15}$', phone): return phone
+    return None
 
 # =========================================================================
 # I. ОБЩИЕ КОМАНДЫ И НАВИГАЦИЯ
@@ -40,20 +57,113 @@ def check_valid_phone(phone: str) -> Optional[str]:
 
 @user_router.message(Command("start"))
 async def cmd_start(message: Message, db, tm, store):
-    # ... (Оставлено как в предыдущем ответе) ...
-    pass
+    uid = message.from_user.id
+    is_subscribed = await db.check_subscription(uid)
+    
+    status_text = ""
+    if is_subscribed:
+        user = await db.get_user(uid)
+        end_date = user.get('subscription_end_date', 'N/A')
+        status_text = (
+            "✅ **Подписка активна!**\n"
+            f"Истекает: `{end_date}`\n"
+        )
+        if uid in tm.store.active_clients:
+            status_text += "🟢 **Воркер Telethon запущен.**"
+        else:
+            status_text += "🔴 **Воркер Telethon остановлен.** Используйте /login для запуска."
+    else:
+        status_text = (
+            "⚠️ **Подписка не активна.**\n"
+            "Вы можете приобрести подписку или использовать промокод."
+        )
+    
+    text = (
+        f"🤖 Привет, **{message.from_user.full_name}**!\n"
+        f"{status_text}\n"
+        f"Доступные команды: /login, /logout, /promo"
+    )
+    await message.answer(text, parse_mode='Markdown')
 
 @user_router.message(Command("logout"))
 async def cmd_logout(message: Message, tm):
     await tm.stop_worker(message.from_user.id)
 
-
 # =========================================================================
 # II. ЛОГИКА АВТОРИЗАЦИИ TELETHON (/login)
 # =========================================================================
 
-# (Весь код cmd_login, auth_get_phone, auth_get_code, auth_get_password остается здесь)
-# ...
+@user_router.message(Command("login"))
+async def cmd_login(message: Message, tm, state: FSMContext):
+    uid = message.from_user.id
+    await state.clear()
+    
+    success, result_msg = await tm.start_auth(uid)
+    
+    if success:
+        return await message.answer(result_msg, parse_mode='Markdown')
+    else:
+        await message.set_state(TelethonAuth.phone)
+        await message.answer("📞 **Введите номер телефона** для авторизации (например, `+79xxxxxxxxxx`):")
+
+@user_router.message(StateFilter(TelethonAuth.phone))
+async def auth_get_phone(message: Message, tm, state: FSMContext):
+    uid = message.from_user.id
+    phone = check_valid_phone(message.text)
+    
+    if not phone:
+        return await message.answer("❌ Неверный формат. Введите номер, начиная с **+** и кодом страны.")
+        
+    result_msg = await tm.send_code(uid, phone)
+    
+    if result_msg and result_msg.startswith("❌"):
+        await state.clear()
+        return await message.answer(result_msg)
+        
+    await state.set_state(TelethonAuth.code)
+    await message.answer(f"✅ Код отправлен на **{phone}**. Введите его:")
+
+@user_router.message(StateFilter(TelethonAuth.code))
+async def auth_get_code(message: Message, tm, state: FSMContext, store):
+    uid = message.from_user.id
+    code = message.text.strip()
+    temp_data = store.store.get(uid)
+    
+    if not temp_data or 'phone' not in temp_data or 'phone_hash' not in temp_data:
+        await state.clear()
+        return await message.answer("❌ Сессия авторизации утеряна. Начните /login заново.")
+        
+    phone = temp_data['phone']
+    phone_hash = temp_data['phone_hash']
+    
+    success, result_msg = await tm.sign_in(uid, phone, code, phone_hash)
+    
+    if success:
+        await state.clear()
+        return await message.answer(result_msg)
+    elif result_msg and result_msg.startswith("⚠️"):
+        # 2FA
+        await state.set_state(TelethonAuth.password)
+        return await message.answer(result_msg)
+    else:
+        # Ошибка кода
+        return await message.answer(result_msg)
+
+@user_router.message(StateFilter(TelethonAuth.password))
+async def auth_get_password(message: Message, tm, state: FSMContext):
+    uid = message.from_user.id
+    password = message.text.strip()
+    
+    success, result_msg = await tm.sign_in_password(uid, password)
+    
+    await message.answer(result_msg)
+    if success:
+        await state.clear()
+    else:
+        # Если пароль неверный, tm.sign_in_password уже очистил сессию
+        await state.clear()
+        await message.answer("Начните /login заново.")
+
 
 # =========================================================================
 # III. ПРОМОКОДЫ
@@ -69,7 +179,7 @@ async def cmd_promo(message: Message, state: FSMContext):
 
 @user_router.message(PromoState.waiting_for_code)
 async def process_promo_code(message: Message, db, state: FSMContext):
-    code = message.text.strip().upper() # Промокоды хранятся в upper case
+    code = message.text.strip().upper() 
     await state.clear()
     
     success, result_msg = await db.apply_promo_code(message.from_user.id, code)
@@ -119,7 +229,7 @@ async def process_create_promo(message: Message, db, state: FSMContext):
         return await message.answer("❌ Неверный формат. Используйте: `КОД ДНИ_СУБС. МАКС_ИСПОЛЬЗОВАНИЙ`")
         
     code, days_str, max_uses_str = parts
-    code = code.upper() # Код в верхнем регистре
+    code = code.upper() 
     
     try:
         days = int(days_str)
