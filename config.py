@@ -1,47 +1,42 @@
 import os
-import pytz
+import logging
 from dotenv import load_dotenv
 
+# Загружаем переменные окружения из файла .env (если он используется)
+# Если вы передаете эти данные напрямую в код, эта строка не нужна,
+# но лучше оставить ее для гибкости.
 load_dotenv()
 
-# =========================================================================
-# I. КОНСТАНТЫ И НАСТРОЙКИ
-# =========================================================================
+# --- 1. КРИТИЧЕСКИЕ НАСТРОЙКИ ---
+BOT_TOKEN = "7868097991:AAEieED31N93hsrJIQnC6omaXuAZ3uA3hdk" # Токен вашего Aiogram бота
+API_ID = 37185453 
+API_HASH = "7e40ac0357454dddbfbbfce511c9ddf1"
 
-# --- AIOGRAM BOT ---
-BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
-try:
-    ADMIN_ID: int = int(os.getenv("ADMIN_ID", "0"))
-except ValueError:
-    ADMIN_ID = 0
+# Ваш ID администратора (для админ-панели и проверки подписки)
+ADMIN_ID = 6256576302 
+if not ADMIN_ID:
+    logging.warning("ADMIN_ID is not set. Admin functions are disabled.")
 
-# --- TELETHON CLIENT ---
-try:
-    API_ID: int = int(os.getenv("API_ID", "0"))
-except ValueError:
-    API_ID = 0
+# --- 2. ПУТИ И ДИРЕКТОРИИ ---
+DATA_DIR = os.path.join(os.getcwd(), "data")
+SESSIONS_DIR = os.path.join(DATA_DIR, "sessions") # Директория для файлов сессий Telethon
+TEMP_DIR = SESSIONS_DIR # Используем SESSIONS_DIR как временную директорию
+
+# Создание папок при запуске
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+# --- 3. НАСТРОЙКИ БОТА И ЛОГИКИ ---
+SUPPORT_BOT_USERNAME = "suppor_tstatpro1bot"
+TARGET_CHANNEL_URL = "https://t.me/STAT_PRO1"
+
+# ✅ Исправление: Обработка URL канала для корректной работы get_chat_member
+# Преобразуем URL в формат @username (или username)
+TARGET_CHANNEL_URL_CLEAN = TARGET_CHANNEL_URL.lstrip('https://t.me/')
+if not TARGET_CHANNEL_URL_CLEAN.startswith('@'):
+    TARGET_CHANNEL_URL_CLEAN = f"@{TARGET_CHANNEL_URL_CLEAN}"
     
-API_HASH: str = os.getenv("API_HASH", "")
+# Используйте TARGET_CHANNEL_URL_CLEAN в коде (например, в handlers.py)
+TARGET_CHANNEL_URL = TARGET_CHANNEL_URL_CLEAN 
 
-# --- НАСТРОЙКИ ---
-SUPPORT_BOT_USERNAME: str = os.getenv("SUPPORT_BOT_USERNAME", "support_bot")
-TARGET_CHANNEL_URL: str = os.getenv("TARGET_CHANNEL_URL", "@default_channel")
-
-# --- PATHS & TIME ---
-TIMEZONE: str = "Europe/Moscow"
-DB_NAME: str = "bot_database.db"
-SESSIONS_DIR: str = "sessions"
-DATA_DIR: str = "data"
-TEMP_DIR: str = os.path.join(DATA_DIR, 'temp')
-DB_PATH: str = os.path.join(DATA_DIR, DB_NAME)
-
-# --- TELETHON SETTINGS ---
-QR_TIMEOUT: int = 180 
-FLOOD_TASK_TIMEOUT: int = 5
-
-# --- TIMEZONE OBJECT ---
-MOSCOW_TZ = pytz.timezone(TIMEZONE)
-
-# Проверка
-if not all([BOT_TOKEN, API_ID, API_HASH, ADMIN_ID]):
-    print("⚠️ ПРЕДУПРЕЖДЕНИЕ: Не все переменные окружения заполнены в .env")
+QR_TIMEOUT = 60 # Время жизни QR-кода в секундах
