@@ -1,24 +1,52 @@
-import os
 import pytz
-from dotenv import load_dotenv
+from datetime import timedelta
 
-# Загрузка переменных окружения из .env
-load_dotenv()
+# ВНИМАНИЕ: Все ключевые значения теперь заданы напрямую в этом файле.
+
+# =========================================================================
+# I. CORE НАСТРОЙКИ (ЖЕСТКО ЗАДАННЫЕ ЗНАЧЕНИЯ)
+# =========================================================================
 
 # --- AIOGRAM BOT ---
-BOT_TOKEN = os.getenv("7868097991:AAEieED31N93hsrJIQnC6omaXuAZ3uA3hdk") 
-try:
-    ADMIN_ID = int(os.getenv("6256576302"))
-except (TypeError, ValueError):
-    ADMIN_ID = None # Важно, чтобы был None, если не установлен
+# Ваш актуальный токен
+BOT_TOKEN = "7868097991:AAEieED31N93hsrJIQnC6omaXuAZ3uA3hdk"
+
+# Ваш личный ID администратора
+ADMIN_ID = 6256576302 
 
 # --- TELETHON CLIENT ---
-API_ID = int(os.getenv("37185453"))
-API_HASH = os.getenv("7e40ac0357454dddbfbbfce511c9ddf1")
+# Ваши ключи с my.telegram.org
+API_ID = 37185453
+API_HASH = "7e40ac0357454dddbfbbfce511c9ddf1" 
 
-# --- НАСТРОЙКИ ---
-SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME", "suppor_tstatpro1bot")
-TARGET_CHANNEL_URL = os.getenv("TARGET_CHANNEL_URL") # Для проверки подписки
-DB_NAME = 'bot_database.db'
-TIMEZONE_MSK = pytz.timezone('Europe/Moscow')
-RATE_LIMIT_TIME = 0.5
+# =========================================================================
+# II. НАСТРОЙКИ ФУНКЦИОНАЛА
+# =========================================================================
+
+# Настройки базы данных
+DB_NAME = "database.db"
+SESSION_DIR = "sessions" # Папка для хранения файлов сессий Telethon
+
+# Часовой пояс для работы с датами и расчетами в БД
+TIMEZONE_MSK = pytz.timezone("Europe/Moscow") 
+
+# Настройки чекера подписки
+TARGET_CHANNEL_URL = "https://t.me/STAT_PRO1"
+SUPPORT_BOT_USERNAME = "suppor_tstatpro1bot"
+
+# Ограничение частоты запросов
+RATE_LIMIT_TIME = 5 # Секунд
+RATE_LIMIT_COUNT = 5 # Количество действий
+
+# Время ожидания ответа от Telethon
+TELETHON_TIMEOUT = 10 
+
+# =========================================================================
+# III. НАСТРОЙКИ DROP-СИСТЕМЫ
+# =========================================================================
+
+# Время, по истечении которого сессия дропа считается "забытой"
+DROP_SESSION_TIMEOUT = timedelta(hours=2)
+
+# ID чата для логов Drop-системы (используем ADMIN_ID)
+DROP_LOG_CHAT_ID = ADMIN_ID
