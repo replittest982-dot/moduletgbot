@@ -1,357 +1,314 @@
 import asyncio
 import logging
 import os
-import random
-import textwrap
-from typing import Dict, Any, Optional, Tuple, List
-from io import BytesIO
+import time
 
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError, AuthKeyUnregisteredError, ChannelPrivateError
-from telethon.tl.types import User
-import qrcode
-from PIL import Image
+from telethon.tl.types import PeerUser, PeerChannel, PeerChat
 
-# УБРАНЫ ТОЧКИ ПЕРЕД ИМЕНАМИ МОДУЛЕЙ
-from config import API_ID, API_HASH, ADMIN_ID, QR_TIMEOUT, FLOOD_TASK_TIMEOUT
-from utils import GlobalStorage, check_valid_phone 
-from db import AsyncDatabase 
+# Вам нужно убедиться, что эти импорты корректны для вашей структуры проекта
+# Например:
+# from config import API_ID, API_HASH, TEMP_DIR, ADMIN_ID
+# from db import AsyncDatabase
+# from utils import GlobalStorage # Или как вы называете ваше глобальное хранилище
+# ...
 
 logger = logging.getLogger(__name__)
 
-class TelethonManager:
-    def __init__(self, bot, store: GlobalStorage, db: AsyncDatabase):
-        self.bot = bot
-        self.store = store
-        self.db = db
+# --- ВАЖНО: Замените на ваши реальные классы и константы ---
+# class AsyncDatabase:
+#     async def get_session_data(self, user_id): return {'phone': '+7...', 'session_name': 'user_sess'}
+#     async def update_user(self, user_id, **kwargs): pass
+#     async def update_chat_pc_mapping(self, chat_id, topic_id, pc_name, user_id): pass
+#     async def get_user_id_by_session_name(self, session_name): return 12345
+#     async def get_admin_id(self): return 123456789
 
-    # --- Worker Management ---
-    async def _start_worker(self, client: TelegramClient, user_id: int):
-        client.add_event_handler(
-            self._handle_outgoing_message, 
-            events.NewMessage(outgoing=True)
-        )
-        task = asyncio.create_task(client.run_until_disconnected())
-        self.store.active_workers[user_id] = task
-        self.store.active_clients[user_id] = client
+# class GlobalStorage:
+#     def __init__(self):
+#         self.active_workers = {}  # {user_id: Task}
+#         self.process_progress = {} # {user_id: {'type': 'flood', ...}}
+#         self.temp_data = {} # {user_id: {'qr_login_data': obj, 'client': client}}
+#         self.drop_mapping = {} # {(chat_id, topic_id): 'PC_Name'}
+
+# class Config:
+#     API_ID = 12345
+#     API_HASH = 'YOUR_HASH'
+#     TEMP_DIR = 'sessions'
+#     ADMIN_ID = 123456789
+# -----------------------------------------------------------------------
+
+
+class TelethonManager:
+    def __init__(self, db, store, config):
+        self.db = db
+        self.store = store
+        self.config = config
+        self.sessions = {}  # {user_id: TelethonClient}
+        self.qr_sessions = {} # {user_id: (Client, QRLogin)}
+
+        # Убедимся, что папка для сессий существует
+        if not os.path.exists(self.config.TEMP_DIR):
+            os.makedirs(self.config.TEMP_DIR)
+
+    # ----------------------------------------------------
+    # ⚙️ Базовые методы клиента
+    # ----------------------------------------------------
+
+    def get_session_path(self, user_id: int):
+        """Возвращает путь к файлу сессии."""
+        return os.path.join(self.config.TEMP_DIR, f"user_{user_id}")
+
+    async def create_client(self, user_id: int) -> TelegramClient:
+        """Создает и подключает клиент, используя данные из БД."""
+        
+        # Если клиент уже есть, возвращаем его
+        if user_id in self.sessions:
+            return self.sessions[user_id]
+        
+        session_path = self.get_session_path(user_id)
+        
+        # Получаем данные сессии из БД (например, телефон для именования сессии)
+        user_session_data = await self.db.get_session_data(user_id)
+        if not user_session_data or not user_session_data.get('phone'):
+             # Создаем временный клиент для аутентификации
+             client = TelegramClient(session_path, self.config.API_ID, self.config.API_HASH)
+        else:
+             # Используем phone для уникальности, если нужно
+             client = TelegramClient(session_path, self.config.API_ID, self.config.API_HASH)
+        
+        # Подключаемся, но не авторизуемся, если это новый клиент
+        if not client.is_connected():
+            await client.connect()
+            
+        return client
+
+    async def finalize_auth(self, user_id: int, client: TelegramClient):
+        """Завершает аутентификацию, обновляет статус в БД и сохраняет клиента."""
+        self.sessions[user_id] = client
         await self.db.update_user(user_id, telethon_active=1)
-        logger.info(f"Telethon worker started for {user_id}")
-        return client.get_me()
+        # Сохраняем клиента, чтобы он не был собран сборщиком мусора
+        await client.get_me() # Простой запрос для проверки и сохранения сессии
+        
+    # ----------------------------------------------------
+    # 📱 Phone Login
+    # ----------------------------------------------------
+
+    async def send_code(self, user_id: int, phone: str) -> str:
+        """Отправляет код подтверждения на телефон."""
+        try:
+            client = await self.create_client(user_id)
+            sent_code = await client.send_code_request(phone)
+            
+            # Сохраняем временные данные для проверки
+            self.store.temp_data[user_id] = {
+                'phone': phone,
+                'sent_code': sent_code,
+                'client': client
+            }
+            return "✅ Код отправлен."
+        except Exception as e:
+            logger.error(f"Error sending code for {user_id}: {e}")
+            return f"❌ Ошибка отправки кода: {e}"
+
+    async def sign_in(self, user_id: int, code: str):
+        """Проверяет код и пытается войти."""
+        data = self.store.temp_data.get(user_id)
+        if not data:
+            return False, "❌ Сессия аутентификации утеряна.", None
+
+        client, phone, sent_code = data['client'], data['phone'], data['sent_code']
+        
+        try:
+            await client.sign_in(phone, code, password=None) # Пробуем без пароля
+            await self.finalize_auth(user_id, client)
+            return True, "✅ Успешный вход!", client
+        except Exception as e:
+            if "Password required" in str(e):
+                return False, "⚠️ Требуется пароль 2FA.", client
+            
+            logger.error(f"Sign in error for {user_id}: {e}")
+            return False, f"❌ Ошибка входа: {e}", client
+
+    async def sign_in_password(self, user_id: int, password: str):
+        """Проверяет пароль 2FA и завершает вход."""
+        data = self.store.temp_data.get(user_id)
+        if not data:
+            return False, "❌ Сессия аутентификации утеряна."
+
+        client, phone = data['client'], data['phone']
+        
+        try:
+            await client.sign_in(phone, password=password)
+            await self.finalize_auth(user_id, client)
+            return True, "✅ Успешный вход!"
+        except Exception as e:
+            logger.error(f"Password error for {user_id}: {e}")
+            return False, f"❌ Ошибка пароля: {e}"
+
+    # ----------------------------------------------------
+    # 🖼️ QR Login (Исправлено)
+    # ----------------------------------------------------
+    async def start_qr_login(self, user_id: int) -> str:
+        """Начинает процесс QR-логина и возвращает URL."""
+        client = await self.create_client(user_id)
+        
+        # client.qr_login() возвращает QRLogin object
+        qr_login_data = await client.qr_login() 
+        url = qr_login_data.url
+        
+        # Сохраняем сессию QR и клиента в store.temp_data для check_qr_login
+        # Используем store.temp_data, т.к. handlers.py ожидает данные именно там
+        self.store.temp_data[user_id] = {
+            'qr_login_data': qr_login_data, 
+            'client': client
+        }
+        
+        # Возвращаем только URL. Генерация изображения происходит в handlers.py
+        return url
+
+    async def check_qr_login(self, user_id: int, qr_login_data, client):
+        """Проверяет статус QR-логина."""
+        try:
+            # Ожидаем завершения аутентификации (внутри этого метода Telethon ждет скана)
+            await qr_login_data.wait() 
+            
+            if await client.is_user_authorized():
+                # Успешный вход
+                await self.finalize_auth(user_id, client)
+                return True, "✅ Успешный вход через QR-код!"
+            
+            # Если не авторизован, но wait() прошел, это может быть 2FA
+            return False, "⚠️ Требуется пароль 2FA."
+            
+        except asyncio.CancelledError:
+            # Если отменено по таймауту или вручную
+            return False, "❌ QR-авторизация отменена или истек таймаут."
+        except Exception as e:
+            error_str = str(e)
+            if "Password required" in error_str:
+                return False, "⚠️ Требуется пароль 2FA."
+            elif "not yet logged in" in error_str:
+                return False, "❌ QR-код не был отсканирован или авторизация отклонена."
+            
+            logger.error(f"Check QR Login error for {user_id}: {e}")
+            return False, f"❌ Ошибка QR-логина: {e}"
+        finally:
+             # Очищаем временные данные, даже если был сбой
+            if user_id in self.store.temp_data:
+                del self.store.temp_data[user_id]
+
+    # ----------------------------------------------------
+    # 🏃 Worker Logic (Обработчик событий)
+    # ----------------------------------------------------
+
+    def register_handlers(self, client: TelegramClient, user_id: int):
+        """Регистрирует обработчики для исходящих сообщений Telethon."""
+        
+        # Создаем обработчик для конкретного клиента
+        @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(.+)'))
+        async def handle_outgoing_commands(event):
+            # Извлекаем текст команды без точки
+            full_command = event.pattern_match.group(1).strip()
+            command, *args = full_command.split(maxsplit=1)
+            args_str = args[0] if args else ""
+            
+            # --- Логика команд Worker'а ---
+            
+            if command == 'пкстарт':
+                # .пкстарт <НазваниеПК>
+                if not args_str:
+                    return await event.reply("❌ Укажите имя ПК: `.пкстарт PC1`")
+                
+                pc_name = args_str.strip()
+                response = await self.process_pc_start(user_id, event.message, pc_name)
+                await event.reply(response)
+            
+            elif command == 'стопфлуд':
+                # Логика остановки флуда (вам нужно реализовать ее в self.store)
+                # ... (ваша логика остановки)
+                await event.reply("🛑 Все активные задачи остановлены (если были).")
+
+            # --- Добавьте здесь логику для .флуд, .лс, .чекгруппу и т.д. ---
+            # ...
+            
+            else:
+                # Если команда не найдена, не отвечаем, чтобы не засорять чат
+                pass
+        
+        # Возвращаем функцию, чтобы ее можно было отменить (хотя здесь она регистрируется)
+        return handle_outgoing_commands
 
     async def start_client_task(self, user_id: int) -> bool:
+        """Запускает клиент Telethon и его обработчики в фоновом режиме."""
         if user_id in self.store.active_workers:
             logger.warning(f"Worker for {user_id} already running.")
             return True
 
-        session_path = self.store.get_session_path(user_id)
-        if not os.path.exists(session_path): return False
-
-        client = TelegramClient(session_path, API_ID, API_HASH)
-        
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                raise AuthKeyUnregisteredError("Session invalid")
-                
-            await self._start_worker(client, user_id)
-            return True
-        except AuthKeyUnregisteredError:
-            logger.error(f"Session file found for {user_id} but not authorized.")
-            await self.db.update_user(user_id, telethon_active=0)
-            self.store.delete_session_file(user_id)
+        client = self.sessions.get(user_id)
+        if not client or not await client.is_user_authorized():
+            logger.error(f"Cannot start worker for {user_id}: client not authorized.")
             return False
+
+        try:
+            # Запускаем клиента и регистрируем обработчики
+            self.register_handlers(client, user_id)
+            await client.start() # Это запускает клиент в фоновом режиме
+            
+            # Сохраняем задачу (например, для контроля)
+            self.store.active_workers[user_id] = client # Храним сам клиент
+            return True
         except Exception as e:
-            logger.error(f"Error starting client {user_id}: {e}")
+            logger.error(f"Failed to start Telethon worker for {user_id}: {e}")
             return False
 
     async def stop_worker(self, user_id: int, delete_session: bool = False):
-        if user_id in self.store.active_workers:
-            self.store.active_workers[user_id].cancel()
-            del self.store.active_workers[user_id]
-
-        if user_id in self.store.active_clients:
-            client = self.store.active_clients.pop(user_id)
-            await client.disconnect()
-            
-        if user_id in self.store.active_tasks:
-            for task in self.store.active_tasks[user_id].values():
-                task.cancel()
-            del self.store.active_tasks[user_id]
-            
-        if user_id in self.store.process_progress:
-            del self.store.process_progress[user_id]
-
+        """Останавливает клиент и удаляет сессию при необходимости."""
+        
+        # 1. Останавливаем клиент Telethon
+        client = self.sessions.pop(user_id, None)
+        if client:
+            try:
+                await client.disconnect()
+            except Exception as e:
+                logger.error(f"Error disconnecting client {user_id}: {e}")
+        
+        # 2. Удаляем из активных задач
+        self.store.active_workers.pop(user_id, None)
+        
+        # 3. Обновляем БД
         await self.db.update_user(user_id, telethon_active=0)
         
+        # 4. Удаляем файл сессии, если нужно
         if delete_session:
-            self.store.delete_session_file(user_id)
-            self.store.delete_session_file(user_id, temp=True)
-            logger.info(f"Session deleted for {user_id}.")
-        
-        logger.info(f"Telethon worker stopped for {user_id}. Delete session: {delete_session}")
-        
-    async def stop_all_workers(self):
-        tasks = [self.stop_worker(uid) for uid in list(self.store.active_workers.keys())]
-        await asyncio.gather(*tasks)
-
-    # --- Auth Logic ---
-    async def _get_client(self, user_id: int, temp: bool = False) -> TelegramClient:
-        session_path = self.store._get_session_path(user_id, temp)
-        return TelegramClient(session_path, API_ID, API_HASH)
-
-    async def finalize_login(self, user_id: int, client: TelegramClient):
-        self.store.rename_session_file(user_id)
-        await self._start_worker(client, user_id)
-        self.store.delete_session_file(user_id, temp=True)
-        self.store.temp_data.pop(user_id, None)
-        
-    async def send_code(self, user_id: int, phone: str) -> str:
-        client = await self._get_client(user_id, temp=True)
-        await client.connect()
-        try:
-            result = await client.send_code_request(phone)
-            self.store.temp_data[user_id] = {'phone': phone, 'phone_code_hash': result.phone_code_hash, 'client': client}
-            return "✅ Код отправлен."
-        except PhoneNumberInvalidError:
-            await client.disconnect()
-            self.store.delete_session_file(user_id, temp=True)
-            return "❌ Неверный номер телефона."
-        except Exception as e:
-            await client.disconnect()
-            self.store.delete_session_file(user_id, temp=True)
-            logger.error(f"Error sending code for {user_id}: {e}")
-            return "❌ Неизвестная ошибка при отправке кода."
-
-    async def sign_in(self, user_id: int, code: str) -> Tuple[bool, str, Optional[TelegramClient]]:
-        data = self.store.temp_data.get(user_id)
-        if not data or 'client' not in data:
-            return False, "❌ Сессия авторизации утеряна. Начните заново.", None
-
-        client = data['client']
-        try:
-            await client.sign_in(data['phone'], code, phone_code_hash=data['phone_code_hash'])
-            await self.finalize_login(user_id, client)
-            return True, "✅ **Успешный вход!** Worker запущен.", client
-        except SessionPasswordNeededError:
-            return False, "⚠️ Требуется ввод пароля 2FA. Введите пароль:", client
-        except Exception as e:
-            await client.disconnect()
-            self.store.delete_session_file(user_id, temp=True)
-            logger.error(f"Error signing in for {user_id}: {e}")
-            return False, f"❌ Ошибка входа: {e}. Сессия удалена.", None
-
-    async def sign_in_password(self, user_id: int, password: str, qr_login: bool = False) -> Tuple[bool, str]:
-        data = self.store.temp_data.get(user_id)
-        if not data or 'client' not in data: return False, "❌ Сессия утеряна. Начните заново."
-
-        client = data['client']
-        try:
-            await client.sign_in(password=password)
-            await self.finalize_login(user_id, client)
-            return True, "✅ **Успешный вход!** Worker запущен."
-        except Exception as e:
-            await client.disconnect()
-            self.store.delete_session_file(user_id, temp=True)
-            logger.error(f"Error signing in password for {user_id}: {e}")
-            return False, "❌ Неверный пароль или неизвестная ошибка. Сессия удалена."
-
-    # --- QR Auth Logic ---
-    async def start_qr_login(self, user_id: int) -> Tuple[str, Any]:
-        client = await self._get_client(user_id, temp=True)
-        await client.connect()
-        qr_login_data = await client.qr_login()
-        self.store.temp_data[user_id] = {'client': client, 'qr_login_data': qr_login_data}
-        return qr_login_data.url, qr_login_data.image
-
-    async def check_qr_login(self, user_id: int, qr_login_data: Any, client: TelegramClient) -> Tuple[bool, str]:
-        try:
-            await client.check_qr_login(qr_login_data) # wait_for делается в handler
-            await self.finalize_login(user_id, client)
-            return True, "✅ **Успешный вход по QR-коду!** Worker запущен."
-        except SessionPasswordNeededError:
-            return False, "⚠️ Требуется ввод пароля 2FA. Введите пароль:"
-        except Exception as e:
-            await client.disconnect()
-            self.store.delete_session_file(user_id, temp=True)
-            logger.error(f"QR login failed for {user_id}: {e}")
-            return False, "❌ Произошла ошибка. Сессия удалена."
-            
-    # --- Telethon Command Handler ---
-    
-    async def _send_and_delete(self, client: TelegramClient, peer_id: Any, text: str, msg_ids: List[int], delay: int = 5):
-        try:
-            sent_msg = await client.send_message(peer_id, text)
-            msg_ids.append(sent_msg.id)
-            await asyncio.sleep(delay)
-            await client.delete_messages(peer_id, msg_ids, revoke=True)
-        except Exception as e:
-             logger.error(f"Error sending/deleting message in Telethon: {e}")
-
-    async def _handle_outgoing_message(self, event):
-        message = event.message
-        uid = event.client.session.path.split('_')[-1].split('.')[0]
-        try:
-            user_id = int(uid)
-        except ValueError:
-            return 
-            
-        if not message.text or not message.text.startswith('.'):
-            return
-
-        client = event.client
-        command = message.text.split()[0].lower()
-        args = message.text.split()[1:]
-
-        if user_id != ADMIN_ID:
-            is_active = await self.db.check_subscription(user_id, ADMIN_ID)
-            if not is_active:
-                await self._send_and_delete(client, message.peer_id, "Нет активной подписки.", [message.id], 3)
-                return
-
-        if command == '.флуд':
-            await self._run_flood_task(user_id, client, message, args)
-        elif command == '.стопфлуд':
-            await self._stop_flood_tasks(user_id, client, message)
-        elif command == '.лс':
-            await self._run_ls_task(user_id, client, message)
-        elif command == '.чекгруппу':
-            await self._run_checkgroup_task(user_id, client, message, args)
-        elif command == '.статус':
-            await self._show_status(user_id, client, message)
-        elif command == '.пкстарт' or command == '.пкворк':
-            await self._handle_drop_mapping(client, message, args)
-
-    # --- Telethon Command Implementations ---
-    
-    async def _run_flood_task(self, user_id, client, message, args):
-        if len(args) < 3:
-            return await self._send_and_delete(client, message.peer_id, "Формат: .флуд <кол-во> <текст> <задержка> [цель]", [message.id])
-
-        try:
-            count = int(args[0])
-            text = args[1]
-            delay = float(args[2])
-            target_peer = args[3] if len(args) > 3 else message.peer_id
-        except ValueError:
-            return await self._send_and_delete(client, message.peer_id, "Неверный формат.", [message.id])
-
-        task_key = f"flood_{random.randint(1000, 9999)}"
-        if user_id not in self.store.active_tasks: self.store.active_tasks[user_id] = {}
-        
-        async def flood_worker():
-            i = 0
-            while count <= 0 or i < count:
-                try:
-                    await client.send_message(target_peer, text)
-                    i += 1
-                    self.store.process_progress[user_id] = {'type': 'flood', 'sent': i, 'total': count if count > 0 else '∞', 'key': task_key}
-                    await asyncio.sleep(delay)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.error(f"Flood error for {user_id}: {e}")
-                    break
-        
-            if user_id in self.store.active_tasks and task_key in self.store.active_tasks[user_id]:
-                del self.store.active_tasks[user_id][task_key]
-                if self.store.process_progress.get(user_id, {}).get('key') == task_key:
-                    del self.store.process_progress[user_id]
-            
-            await self._send_and_delete(client, message.peer_id, f"✅ Флуд '{task_key}' завершен. Отправлено {i}.", [], FLOOD_TASK_TIMEOUT)
-            
-        self.store.active_tasks[user_id][task_key] = asyncio.create_task(flood_worker())
-        await self._send_and_delete(client, message.peer_id, f"🟢 Флуд запущен. Ключ: {task_key}.", [message.id], FLOOD_TASK_TIMEOUT)
-
-    async def _stop_flood_tasks(self, user_id, client, message):
-        if user_id in self.store.active_tasks:
-            flood_tasks = {k: t for k, t in self.store.active_tasks[user_id].items() if k.startswith('flood_')}
-            for key, task in flood_tasks.items():
-                task.cancel()
-                del self.store.active_tasks[user_id][key]
-            if self.store.process_progress.get(user_id, {}).get('type') == 'flood':
-                del self.store.process_progress[user_id]
-            await self._send_and_delete(client, message.peer_id, "🛑 Флуды остановлены.", [message.id], FLOOD_TASK_TIMEOUT)
-        else:
-            await self._send_and_delete(client, message.peer_id, "Нет активных задач.", [message.id], FLOOD_TASK_TIMEOUT)
-
-    async def _run_ls_task(self, user_id, client, message):
-        parts = message.text.split('\n')
-        if len(parts) < 2:
-            return await self._send_and_delete(client, message.peer_id, "Формат: .лс <текст>\n<@username1>\n...", [message.id])
-        
-        message_txt = parts[0][len(".лс"):].strip()
-        recipients = [r.strip() for r in parts[1:] if r.strip()]
-        await client.delete_messages(message.peer_id, [message.id], revoke=True)
-
-        async def ls_worker():
-            report = []
-            for recipient in recipients:
-                try:
-                    await client.send_message(recipient, message_txt)
-                    report.append(f"✅ {recipient}")
-                except Exception as e:
-                    report.append(f"❌ {recipient}: {e}")
-                await asyncio.sleep(0.5)
-            await self.bot.send_message(user_id, f"**Отчет .лс:**\n" + "\n".join(report), parse_mode='Markdown')
-            
-        asyncio.create_task(ls_worker())
-        await client.send_message(message.peer_id, f"🟢 Рассылка {len(recipients)} получателям.")
-        
-    async def _run_checkgroup_task(self, user_id, client, message, args):
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        target_chat = args[0] if args else message.peer_id
-        task_key = "checkgroup"
-        if user_id in self.store.active_tasks and task_key in self.store.active_tasks[user_id]:
-             self.store.active_tasks[user_id][task_key].cancel()
-
-        status_msg = await client.send_message(message.peer_id, "🟢 Сканирование...")
-        await client.delete_messages(message.peer_id, [message.id], revoke=True)
-
-        async def checkgroup_worker():
-            users = {}
-            processed_count = 0
+            session_path = self.get_session_path(user_id)
             try:
-                entity = await client.get_entity(target_chat)
-                async for msg in client.iter_messages(entity, reverse=True):
-                    processed_count += 1
-                    if msg.sender and isinstance(msg.sender, User) and msg.sender.id not in users:
-                        users[msg.sender.id] = {'id': msg.sender.id, 'username': msg.sender.username or '—', 'name': (msg.sender.first_name or '') + (msg.sender.last_name or '')}
-                    self.store.process_progress[user_id] = {'type': 'checkgroup', 'processed': processed_count, 'total_users': len(users), 'key': task_key, 'peer_name': entity.title or str(entity.id)}
-                    await asyncio.sleep(0.01)
+                os.remove(f"{session_path}.session")
+            except FileNotFoundError:
+                pass
             except Exception as e:
-                logger.error(f"Checkgroup error: {e}")
-                return
+                logger.error(f"Error deleting session file for {user_id}: {e}")
 
-            report_data = ["Имя | @username | ID"]
-            for u in users.values(): report_data.append(f"{u['name']} | @{u['username']} | {u['id']}")
-            peer_name = entity.title or str(entity.id)
-            report_data.insert(0, f"Отчет: {peer_name}, найдено {len(users)}.")
-            
-            self.store.process_progress[user_id]['report_data'] = "\n".join(report_data)
-            self.store.process_progress[user_id]['peer_name'] = peer_name
-
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Файлом .txt", callback_data="report_send")],[InlineKeyboardButton(text="Удалить отчёт", callback_data="report_delete")]])
-            await self.bot.send_message(user_id, f"✅ **Готово!** Найдено: **{len(users)}** в `{peer_name}`.", reply_markup=kb, parse_mode='Markdown')
-            await client.delete_messages(message.peer_id, [status_msg.id], revoke=True)
-            if user_id in self.store.active_tasks and task_key in self.store.active_tasks[user_id]: del self.store.active_tasks[user_id][task_key]
-
-        if user_id not in self.store.active_tasks: self.store.active_tasks[user_id] = {}
-        self.store.active_tasks[user_id][task_key] = asyncio.create_task(checkgroup_worker())
-
-    async def _show_status(self, user_id, client, message):
-        await client.delete_messages(message.peer_id, [message.id], revoke=True)
-        progress = self.store.process_progress.get(user_id)
-        status_text = "Нет активных задач."
-        if progress:
-            if progress['type'] == 'flood': status_text = f"Флуд: {progress['sent']}/{progress['total']}."
-            elif progress['type'] == 'checkgroup': status_text = f"Скан `{progress['peer_name']}`: {progress['processed']} сообщ, {progress['total_users']} юзеров."
-        status_msg = await client.send_message(message.peer_id, status_text)
-        await asyncio.sleep(5)
-        await client.delete_messages(message.peer_id, [status_msg.id], revoke=True)
-
-    async def _handle_drop_mapping(self, client: TelegramClient, message, args: List[str]):
-        if not args: return await self._send_and_delete(client, message.peer_id, "Формат: .пкстарт <НазваниеПК>", [message.id])
-        pc_name = args[0].upper()
-        thread_id = message.reply_to_msg_id if message.is_topic_message else 0
-        self.store.drop_mapping[(message.peer_id.channel_id, thread_id)] = pc_name
-        await self._send_and_delete(client, message.peer_id, f"✅ Привязан ПК: **{pc_name}**.", [message.id], FLOOD_TASK_TIMEOUT)
+    # ----------------------------------------------------
+    # 🖥️ Drop/ПК-Logic
+    # ----------------------------------------------------
+    
+    # 💡 ВАЖНО: Убедитесь, что этот метод использует вашу БД и GlobalStorage
+    async def process_pc_start(self, user_id: int, message_obj, pc_name: str) -> str:
+        """
+        Привязывает название ПК к текущему чату/топику.
+        Вызывается из обработчика исходящих сообщений Telethon.
+        """
+        chat_id = message_obj.chat_id
+        # Проверяем, что это не обычный чат, а топик (если применимо)
+        topic_id = message_obj.reply_to_msg_id if message_obj.reply_to_msg_id != None else 0
+        
+        # Ключ: (chat_id, topic_id)
+        key = (chat_id, topic_id)
+        
+        # Сохраняем привязку в глобальном хранилище
+        self.store.drop_mapping[key] = pc_name
+        
+        # Сохраняем привязку в БД (если нужно, чтобы она сохранилась после перезапуска)
+        await self.db.update_chat_pc_mapping(chat_id, topic_id, pc_name, user_id)
+        
+        return f"✅ ПК **{pc_name}** привязан к этому чату/топику! Дропы могут использовать команды /numb, /vstal и т.д. в этом чате."
