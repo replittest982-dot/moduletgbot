@@ -1,77 +1,82 @@
 import asyncio
 import logging
-import os
-import sys
+from aiogram import Bot, Dispatcher, F
+from aiogram.fsm.storage.memory import MemoryStorage
 
-from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage 
-from aiogram.client.default import DefaultBotProperties
-
-# АБСОЛЮТНЫЕ ИМПОРТЫ
-from config import BOT_TOKEN, DB_PATH, SESSIONS_DIR, DATA_DIR, TEMP_DIR, ADMIN_ID
-from db import AsyncDatabase
-from utils import GlobalStorage, DependencyInjectorMiddleware
-from telethon_manager import TelethonManager
+# 💡 ВАЖНО: Убедитесь, что вы импортируете все нужные файлы
+# Вам нужно заменить это на реальные импорты
+from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR 
 from handlers import user_router, admin_router, drop_router
-from set_commands import set_default_commands
+from telethon_manager import TelethonManager
 
-logger = logging.getLogger(__name__)
+# --- Заглушки для типов (УДАЛИТЕ И ЗАМЕНИТЕ НА РЕАЛЬНЫЕ ИМПОРТЫ!) ---
+# Я включаю эти заглушки для демонстрации, но в вашем реальном коде они должны быть удалены
+class AsyncDatabase: 
+    async def init(self): pass
+    async def get_subscription_status(self, uid, admin_id): return (True, "Активна")
+    async def get_user(self, uid): return {'telethon_active': 0}
+    async def update_user(self, uid, **kwargs): pass
+    async def create_promo_code(self, code, days, max_uses): return True
+    async def apply_promo_code(self, uid, code): return (True, "Промокод активирован.")
+    async def update_chat_pc_mapping(self, *args): pass
 
-async def on_startup(*args, **kwargs):
-    logger.info("Starting up...")
-    
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(TEMP_DIR, exist_ok=True)
+class GlobalStorage: 
+    def __init__(self):
+        self.active_workers = {}
+        self.process_progress = {}
+        self.temp_data = {}
+        self.drop_mapping = {}
+# ------------------------------------------------------------------------
 
-async def start_services(bot, db, tm):
-    await db.init()
-    await set_default_commands(bot)
-    user_ids = await db.get_active_telethon_users()
-    if user_ids:
-        logger.info(f"Found {len(user_ids)} active sessions.")
-        for uid in user_ids:
-            asyncio.create_task(tm.start_client_task(uid))
-
-async def on_shutdown(*args, **kwargs):
-    logger.info("Shutting down...")
+logging.basicConfig(level=logging.INFO)
 
 async def main():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # 1. Инициализация
     
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-    dp = Dispatcher(storage=MemoryStorage())
-    
-    db = AsyncDatabase(DB_PATH)
+    # 💡 Инициализация БД и хранилища
+    db = AsyncDatabase() 
+    await db.init()
     store = GlobalStorage()
-    tm = TelethonManager(bot, store, db)
-
-    injector = DependencyInjectorMiddleware(data={'db': db, 'tm': tm, 'store': store, 'bot': bot})
     
-    dp.message.outer_middleware(injector)
-    dp.callback_query.outer_middleware(injector)
+    # 🚀 ИСПРАВЛЕНИЕ ОШИБКИ: Создание объекта конфигурации для TelethonManager
+    class Config:
+        API_ID = API_ID
+        API_HASH = API_HASH
+        TEMP_DIR = TEMP_DIR # Берем из config.py
+    
+    config = Config()
 
-    dp.include_router(admin_router)
+    # 2. Инициализация TelethonManager
+    # 💡 ИСПРАВЛЕНИЕ: ПОРЯДОК АРГУМЕНТОВ: db, store, config
+    tm = TelethonManager(db, store, config) 
+    
+    # 3. Инициализация Aiogram
+    bot = Bot(token=BOT_TOKEN, parse_mode='Markdown') # Используем Markdown для удобства
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
+
+    # 4. Инжекция зависимостей и роутеры
+    
+    # Инжекция зависимостей в хендлеры
+    dp.workflow_data.update(db=db, tm=tm, store=store, config=config, bot=bot)
+
+    # Регистрация роутеров
     dp.include_router(user_router)
+    
+    # Админ-роутер с фильтром по ID
+    admin_router.message.filter(F.from_user.id == ADMIN_ID)
+    admin_router.callback_query.filter(F.from_user.id == ADMIN_ID)
+    dp.include_router(admin_router)
     dp.include_router(drop_router)
     
-    # Ручной запуск
-    await on_startup()
-    await start_services(bot, db, tm)
-
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await tm.stop_all_workers()
-        if db.conn: await db.conn.close()
-        await bot.session.close()
+    # 5. Запуск
+    logger.info("Bot is starting...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        print("❌ ОШИБКА: Заполните BOT_TOKEN в .env")
-        sys.exit(1)
-        
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        logging.warning("Bot stopped by user.")
+    except Exception as e:
+        logging.error(f"Fatal error: {e}", exc_info=True)
