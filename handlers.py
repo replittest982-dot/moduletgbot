@@ -36,7 +36,7 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
     # Логика для пользователей с подпиской (включая админа)
     if is_subscribed or is_admin:
         
-        # 💡 ИСПРАВЛЕНИЕ: Кнопка промокода доступна всегда, если есть подписка
+        # Кнопка промокода доступна всегда, если есть подписка
         if not is_telethon_active:
             # Если нет активного Telethon аккаунта: показываем кнопки входа
             kb.append([
@@ -154,7 +154,7 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         return await callback.message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
         
     try:
-        # Ожидаем только URL
+        # Ожидаем только URL (именно так работает start_qr_login в Telethon без image)
         url = await tm.start_qr_login(callback.from_user.id) 
     except Exception as e: 
         logger.error(f"QR Login start error: {e}")
@@ -331,10 +331,10 @@ async def promo_proc(message: Message, state: FSMContext, db: AsyncDatabase, bot
 @admin_router.callback_query(F.data == "admin_panel")
 async def cb_admin(callback: CallbackQuery, **kwargs):
     if callback.from_user.id != ADMIN_ID: return
-    # 💡 ИСПРАВЛЕНИЕ: Упрощенная и корректная Markdown разметка
+    # 💡 ИСПРАВЛЕНИЕ: Убираем излишнюю разметку Markdown для текста инструкций
     text = (
-        "**👑 Админ-Панель**\n\n"
-        "**Создание промокода:** `/create_promo`\n"
+        "👑 **Админ-Панель**\n\n"
+        "**Создание промокода:** /create_promo\n"
         "Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`\n"
         "Пример: `/create_promo TEST 30 10`"
     )
