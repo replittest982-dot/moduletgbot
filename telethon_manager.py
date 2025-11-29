@@ -5,7 +5,7 @@ import shutil
 import time
 from telethon import TelegramClient, events
 from telethon.tl.types import PeerUser
-from telethon.errors import SessionPasswordNeededError, FloodWaitError, AuthKeyUnregisteredError, PasswordHashInvalidError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, AuthKeyUnregisteredError, PasswordHashInvalidError, PhoneCodeInvalidError
 from telethon.sessions import StringSession
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,6 @@ class TelethonManager:
                 return client
             
         if session_file is None:
-            # Используем .session для файловой сессии
             session_file = os.path.join(self.TEMP_DIR, f"session_{user_id}.session")
             
         client = TelegramClient(session_file, self.API_ID, self.API_HASH, 
@@ -45,78 +44,102 @@ class TelethonManager:
 
     async def register_handlers(self, client: TelegramClient, user_id: int):
         # Здесь должна быть логика ваших обработчиков событий Telethon
-        # Например: client.add_event_handler(self.new_message_handler, events.NewMessage)
         pass
 
     # --- АВТОРИЗАЦИЯ ПО НОМЕРУ ---
     async def send_code(self, user_id: int, phone: str) -> str:
+        """📱 Отправка SMS кода"""
         client = await self.create_client(user_id)
         self.store.temp_data[user_id] = {'client': client, 'phone': phone}
         try:
             await client.connect()
             result = await client.send_code_request(phone)
             self.store.temp_data[user_id]['phone_code_hash'] = result.phone_code_hash
+            await self.db.update_user(user_id, telethon_active=1)  # 1 = авторизуется
             return "✅ Код отправлен. Введите его:"
         except FloodWaitError as e:
             logger.warning(f"FloodWait on send_code for {user_id}: {e}")
-            return f"❌ Превышен лимит запросов. Попробуйте через {e.seconds} секунд."
+            return f"❌ FloodWait: подождите {e.seconds}s"
         except Exception as e:
-            await self.stop_worker(user_id, delete_session=True)
-            return f"❌ Ошибка отправки кода: {e}"
+            await self.stop_worker(user_id, True)
+            return f"❌ Ошибка: {e}"
 
     async def sign_in(self, user_id: int, code: str) -> tuple[bool, str, str | None]:
+        """🔢 Ввод SMS кода"""
         data = self.store.temp_data.get(user_id)
-        if not data: return False, "❌ Сессия утеряна.", None
-        client = data['client']
+        # ✅ ИСПРАВЛЕНИЕ: Исправлен синтаксис 'if not'
+        if not data or 'client' not in data: 
+             return False, "❌ Сессия утеряна", None
         
+        client = data['client']
+        phone = data.get('phone')
+        phone_code_hash = data.get('phone_code_hash')
+
         try:
-            await client.sign_in(data['phone'], code, phone_code_hash=data['phone_code_hash'])
-            session_str = StringSession.save(client.session)
+            await client.sign_in(phone, code, phone_code_hash)
+            me = await client.get_me()
+            # ✅ ИСПРАВЛЕНИЕ: Корректное сохранение сессии в StringSession
+            session_str = StringSession.save(client.session) 
             await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
-            del self.store.temp_data[user_id]
-            return True, "✅ Успешный вход!", None
+            del self.store.temp_data[user_id] # Очищаем временные данные
+            return True, f"✅ Вход успешен! @{me.username}", session_str
         except SessionPasswordNeededError:
-            return False, "⚠️ Требуется 2FA пароль.", None
-        except FloodWaitError as e:
-            return False, f"❌ Превышен лимит: {e.seconds}с.", None
+            return False, "⚠️ Требуется пароль 2FA", None
+        except PhoneCodeInvalidError:
+            return False, "❌ Неверный код. Попробуйте снова.", None
         except Exception as e:
-            await self.stop_worker(user_id, delete_session=True)
-            return False, f"❌ Ошибка входа: {e}", None
+            logger.error(f"Sign_in error for {user_id}: {e}")
+            await self.stop_worker(user_id, True)
+            return False, f"❌ Ошибка кода: {e}", None
 
     async def sign_in_password(self, user_id: int, password: str) -> tuple[bool, str]:
+        """🔑 Ввод пароля 2FA"""
         data = self.store.temp_data.get(user_id)
-        if not data: return False, "❌ Сессия утеряна."
+        # ✅ ИСПРАВЛЕНИЕ: Исправлен синтаксис 'if not'
+        if not data or 'client' not in data: 
+             return False, "❌ Сессия утеряна"
+        
         client = data['client']
-
         try:
             await client.sign_in(password=password)
+            me = await client.get_me()
+            # ✅ ИСПРАВЛЕНИЕ: Корректное сохранение сессии
             session_str = StringSession.save(client.session)
             await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
-            del self.store.temp_data[user_id]
-            return True, "✅ Успешный вход!"
+            del self.store.temp_data[user_id] # Очищаем временные данные
+            return True, f"✅ 2FA успешен! @{me.username}"
         except (PasswordHashInvalidError, SessionPasswordNeededError):
-            return False, "❌ Неверный 2FA пароль."
+            return False, "❌ Неверный пароль 2FA."
         except Exception as e:
-            await self.stop_worker(user_id, delete_session=True)
+            logger.error(f"Sign_in_password error for {user_id}: {e}")
+            await self.stop_worker(user_id, True)
             return False, f"❌ Ошибка: {e}"
 
     # --- АВТОРИЗАЦИЯ ПО QR-КОДУ ---
-    async def start_qr_login(self, user_id: int) -> str:
+    async def start_qr_login(self, user_id: int) -> tuple[str, object]:
+        """📱 QR авторизация (возвращает URL и объект для ожидания)"""
         client = await self.create_client(user_id)
         self.store.temp_data[user_id] = {'client': client}
+        
         try:
             await client.connect()
-            qr_login = await client.qr_login()
-            self.store.temp_data[user_id]['qr_login_data'] = qr_login
-            return qr_login.url
+            # ✅ ИСПРАВЛЕНИЕ: Использование client.qr_login() и сохранение объекта ожидания
+            qr_login_object = await client.qr_login() 
+            self.store.temp_data[user_id]['qr_login_data'] = qr_login_object
+            return qr_login_object.url, qr_login_object
         except Exception as e:
-            await self.stop_worker(user_id, delete_session=True)
+            logger.error(f"start_qr_login error for {user_id}: {e}")
+            await self.stop_worker(user_id, True)
             raise e
-
-    async def check_qr_login(self, user_id: int, qr_data, client: TelegramClient) -> tuple[bool, str]:
+            
+    async def check_qr_login(self, user_id: int, qr_data_object, client: TelegramClient) -> tuple[bool, str]:
+        """Проверка статуса QR-авторизации"""
         try:
-            await qr_data.wait()
+            # Ожидаем завершения QR-авторизации
+            await qr_data_object.wait()
+            
             if await client.is_user_authorized():
+                # ✅ ИСПРАВЛЕНИЕ: Корректное сохранение сессии
                 session_str = StringSession.save(client.session)
                 await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
                 del self.store.temp_data[user_id]
@@ -127,6 +150,8 @@ class TelethonManager:
         except FloodWaitError as e:
             return False, f"❌ Превышен лимит: {e.seconds}с."
         except Exception as e:
+            logger.error(f"check_qr_login error for {user_id}: {e}")
+            # Не удаляем сессию, если это ошибка ожидания/таймаута, чтобы дать шанс 2FA
             return False, f"❌ Ошибка ожидания QR: {e}"
 
     # --- УПРАВЛЕНИЕ WORKER'АМИ ---
@@ -179,7 +204,6 @@ class TelethonManager:
                     os.remove(session_file)
                 await self.db.update_user(user_id, telethon_active=0, session_str=None)
             else:
-                 # Если просто остановка, статус "Готов к запуску"
                  await self.db.update_user(user_id, telethon_active=1) 
         else:
              if delete_session:
