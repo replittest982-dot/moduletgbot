@@ -4,9 +4,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.middlewares.base import BaseMiddleware 
+from typing import Any, Dict, Awaitable, Callable, Optional 
 
 from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR, TARGET_CHANNEL_URL, SUPPORT_BOT_USERNAME, QR_TIMEOUT
-# Импорт роутеров, которые теперь корректно экспортируются
 from handlers import user_router, admin_router 
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
@@ -16,22 +16,19 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 class DependencyMiddleware(BaseMiddleware):
-    def __init__(self, **data):
+    def __init__(self, **data: Any):
         self.data = data
         super().__init__()
 
-    async def __call__(self, handler, event, data):
+    async def __call__(
+        self,
+        handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: Dict[str, Any]
+    ) -> Any:
+        # Добавляем все наши зависимости (db, tm, bot, config) в контекст data
         data.update(self.data)
         return await handler(event, data)
-
-async def on_startup(bot: Bot, db: AsyncDatabase):
-    await db.init() 
-    await set_commands.set_my_commands(bot, ADMIN_ID) 
-    logger.info("✅ Bot, DB, and Commands ready")
-
-async def on_shutdown(db: AsyncDatabase):
-    await db.close()
-    logger.info("❌ Database connection closed. Bot stopped.")
 
 async def main():
     if not BOT_TOKEN:
@@ -57,15 +54,34 @@ async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     
-    dp.startup.register(on_startup) 
+    # --- 1. ФИКС: Использование замыканий для startup/shutdown ---
+    # Функции on_startup и on_shutdown определены внутри main, 
+    # чтобы иметь доступ к db, tm, config и ADMIN_ID через замыкание.
+    
+    async def on_startup(bot: Bot):
+        """Выполняется при запуске бота."""
+        await db.init() 
+        # Доступ к ADMIN_ID через замыкание
+        await set_commands.set_my_commands(bot, ADMIN_ID) 
+        logger.info("✅ Bot, DB, and Commands ready")
+
+    async def on_shutdown(bot: Bot):
+        """Выполняется при остановке бота."""
+        # Доступ к db через замыкание
+        await db.close()
+        logger.info("❌ Database connection closed. Bot stopped.")
+
+    # --- 2. ФИКС: Правильная регистрация startup/shutdown ---
+    # Теперь регистрируем без лишних аргументов, используя правильную сигнатуру
+    dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
+    # --- 3. ФИКС: Правильная регистрация middleware ---
     middleware = DependencyMiddleware(db=db, tm=tm, bot=bot, config=config)
-    dp.update.outer_middleware(middleware)
+    dp.update.middleware(middleware) # ✅ Использовано dp.update.middleware
     
     dp.include_router(user_router)
     dp.include_router(admin_router)
-    # drop_router не включается, так как его функционал не реализован
     
     logger.info("Bot is starting...")
     await dp.start_polling(bot) 
