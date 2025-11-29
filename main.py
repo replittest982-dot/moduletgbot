@@ -1,110 +1,91 @@
-import logging
 import asyncio
-import os
-import qrcode
-import re
-from io import BytesIO
+import logging
+from aiogram import Bot, Dispatcher, F
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
+from aiogram.dispatcher.middlewares.base import BaseMiddleware 
 
-from aiogram import Bot, Router, F
-from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.state import StatesGroup, State # <-- ИСПРАВЛЕНИЕ 22
-
-# ИМПОРТ РЕАЛЬНЫХ КЛАССОВ (ИСПРАВЛЕНИЕ 21)
-from db import AsyncDatabase
+# Импорт ваших реальных компонентов
+from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR, TARGET_CHANNEL_URL, SUPPORT_BOT_USERNAME
+from handlers import user_router, admin_router, drop_router
 from telethon_manager import TelethonManager
-from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, QR_TIMEOUT, QR_TIMEOUT
+from db import AsyncDatabase
+import set_commands # Для установки команд
 
-# --- 💡 FSM Состояния (ИСПРАВЛЕНИЕ 22: StatesGroup) ---
-class TelethonAuth(StatesGroup): 
-    phone = State()
-    code = State()
-    password = State()
-    waiting_for_qr = State()
-    qr_password = State()
-
-class UserState(StatesGroup): 
-    waiting_promo = State()
-# --------------------------------------------------------
-
+# ✅ ИСПРАВЛЕНИЕ 38: Настройка логирования до импортов
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-user_router = Router(name="user_router")
-admin_router = Router(name="admin_router")
-drop_router = Router(name="drop_router")
+# --- Middleware для передачи зависимостей (✅ ИСПРАВЛЕНИЕ 3, 37) ---
+class DependencyMiddleware(BaseMiddleware):
+    def __init__(self, **data):
+        self.data = data
+        super().__init__()
 
-# --- УТИЛИТА (ИСПРАВЛЕНИЕ 23, 9) ---
-def check_valid_phone(phone: str) -> bool:
-    """Проверяет, соответствует ли строка формату телефона +7..."""
-    return bool(re.match(r'^\+\d{10,15}$', phone.replace(' ', '')))
-# ----------------------------------------------------
+    async def __call__(self, handler, event, data):
+        data.update(self.data)
+        return await handler(event, data)
+# ------------------------------------------------------------------
 
-# (Остальные функции get_main_menu_kb и send_start_menu остаются без изменений,
-#  так как они были исправлены на уровне синтаксиса, а логические ошибки
-#  29, 30, 32 будут исправлены в следующих шагах.)
+# --- on_startup для инициализации (✅ ИСПРАВЛЕНИЕ 10, 35) ---
+async def on_startup(bot: Bot, db: AsyncDatabase):
+    await db.init() # 1. Инициализация БД
+    await set_commands.set_my_commands(bot, ADMIN_ID) # 2. Установка команд
+    logger.info("✅ Bot, DB, and Commands ready")
+# ------------------------------------------------------------------
 
-# ... (код get_main_menu_kb и send_start_menu) ...
+# --- on_shutdown для очистки (✅ ИСПРАВЛЕНИЕ 6, 51) ---
+async def on_shutdown(db: AsyncDatabase):
+    await db.close()
+    logger.info("❌ Database connection closed. Bot stopped.")
 
-@user_router.message(Command("start"))
-async def cmd_start(message: Message, bot: Bot, db: AsyncDatabase, tm: TelethonManager, state: FSMContext):
-    await state.clear() 
-    await send_start_menu(message.from_user.id, bot, db, tm, is_initial_check=True)
+
+async def main():
+    # Проверка токена
+    if not BOT_TOKEN:
+        logger.critical("BOT_TOKEN is not set in config.py!")
+        return
+
+    db = AsyncDatabase() 
     
-# ... (код cb_check_sub, auth_phone, auth_get_phone, auth_get_code, auth_get_pass) ...
+    class Config:
+        API_ID = API_ID
+        API_HASH = API_HASH
+        TEMP_DIR = TEMP_DIR 
+        TARGET_CHANNEL_URL = TARGET_CHANNEL_URL
+        SUPPORT_BOT_USERNAME = SUPPORT_BOT_USERNAME
+    config = Config()
 
-@user_router.message(TelethonAuth.phone) 
-async def auth_get_phone(message: Message, state: FSMContext, tm: TelethonManager, **kwargs):
-    phone = message.text # Сначала берем текст
-    if not check_valid_phone(phone): return await message.answer("❌ Неверный формат.") # ИСПРАВЛЕНИЕ 30
+    tm = TelethonManager(db, config)
     
-    # ... (Остальной код) ...
+    # Инициализация Aiogram
+    default_properties = DefaultBotProperties(parse_mode='Markdown') 
+    bot = Bot(token=BOT_TOKEN, default=default_properties)
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
+    
+    # Регистрация startup/shutdown
+    dp.startup.register(on_startup) 
+    dp.shutdown.register(on_shutdown)
+    
+    # Инжекция зависимостей
+    middleware = DependencyMiddleware(db=db, tm=tm, bot=bot, store=tm.store, config=config)
+    dp.update.outer_middleware(middleware)
+    
+    # --- Регистрация роутеров ---
+    dp.include_router(user_router)
+    
+    # ✅ ИСПРАВЛЕНИЕ 34: Фильтры удалены. Проверка ADMIN_ID будет в хендлерах.
+    dp.include_router(admin_router)
+    dp.include_router(drop_router) # ✅ ИСПРАВЛЕНИЕ 36: drop_router включен
+    
+    logger.info("Bot is starting...")
+    await dp.start_polling(bot, db=db) # Передаем db для on_startup
 
-@user_router.callback_query(F.data == "auth_qr")
-async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
-    await callback.answer("Генерация...")
-    
-    # ... (QR-код генерация) ...
-    
-    # ... (логика ожидания) ...
-    
+if __name__ == "__main__":
     try:
-        success, msg = await asyncio.wait_for(
-            # ИСПРАВЛЕНИЕ 24: (Если бы tm.check_qr_login не возвращал Task)
-            # В данном случае, предполагается, что tm.check_qr_login возвращает awaitable,
-            # и сама проблема "asyncio.wait_for без task" чаще связана с неправильным
-            # использованием `loop.create_task` внутри `tm`. Оставляем пока `await_for`.
-            tm.check_qr_login(callback.from_user.id, data['qr_login_data'], data['client']), 
-            timeout=QR_TIMEOUT + 5
-        )
-    # ... (Остальной код) ...
-    
-    if photo_msg: 
-        try: await photo_msg.delete() # ИСПРАВЛЕНИЕ 25 (было исправлено ранее)
-        except Exception: pass
-    
-    # ... (Остальной код) ...
-    
-    
-# ... (Остальной код worker, logout, promo) ...
-
-@admin_router.message(Command("create_promo"))
-async def cmd_mk_promo(message: Message, state: FSMContext, db: AsyncDatabase, **kwargs):
-    if message.from_user.id != ADMIN_ID: return
-    
-    parts = message.text.split()
-    if len(parts) != 4: 
-        return await message.answer("❌ Неверный формат. Ожидался: `/create_promo КОД ДНИ МАКС_ЮЗЕРОВ` (пример: `/create_promo TEST 30 10`)")
-    
-    try:
-        code = parts[1].strip().upper()
-        days = int(parts[2])
-        max_uses = int(parts[3])
-    except IndexError: # <-- ИСПРАВЛЕНИЕ 26: Обработка IndexError
-        return await message.answer("❌ Неверный формат. Ожидался: `/create_promo КОД ДНИ МАКС_ЮЗЕРОВ`")
-    except ValueError:
-        return await message.answer("❌ Дни и Макс_юзеров должны быть числами.")
-
-    # ... (Остальной код) ...
-
-# ... (Остальной код) ...
+        asyncio.run(main()) 
+    except KeyboardInterrupt:
+        logger.warning("Bot stopped by user (KeyboardInterrupt).")
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}", exc_info=True)
