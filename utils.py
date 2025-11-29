@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from telethon import TelegramClient
 
-# АБСОЛЮТНЫЙ ИМПОРТ
+# УБРАНЫ ТОЧКИ ПЕРЕД ИМЕНАМИ МОДУЛЕЙ
 from config import SESSIONS_DIR, ADMIN_ID, MOSCOW_TZ
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,6 @@ class GlobalStorage:
         self.temp_data: Dict[int, Dict[str, Any]] = {}
         self.active_tasks: Dict[int, Dict[str, asyncio.Task]] = {}
         self.process_progress: Dict[int, Dict[str, Any]] = {}
-        # (chat_id, thread_id) -> pc_name
         self.drop_mapping: Dict[Tuple[int, int], str] = {} 
         
     def _get_session_path(self, user_id: int, temp: bool = False) -> str:
@@ -105,7 +104,6 @@ def format_timedelta(delta: datetime.timedelta) -> str:
     return " ".join(parts[:3])
 
 class DependencyInjectorMiddleware(BaseMiddleware):
-    """Внедряет db, tm, store во все обработчики через kwargs."""
     def __init__(self, data: Dict[str, Any]):
         self.data = data
         super().__init__()
