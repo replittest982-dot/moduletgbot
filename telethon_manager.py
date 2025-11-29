@@ -12,7 +12,7 @@ from telethon.tl.types import User
 import qrcode
 from PIL import Image
 
-# АБСОЛЮТНЫЕ ИМПОРТЫ
+# УБРАНЫ ТОЧКИ ПЕРЕД ИМЕНАМИ МОДУЛЕЙ
 from config import API_ID, API_HASH, ADMIN_ID, QR_TIMEOUT, FLOOD_TASK_TIMEOUT
 from utils import GlobalStorage, check_valid_phone 
 from db import AsyncDatabase 
@@ -129,7 +129,6 @@ class TelethonManager:
 
         client = data['client']
         try:
-            # ИСПРАВЛЕНИЕ: Используем phone_code_hash
             await client.sign_in(data['phone'], code, phone_code_hash=data['phone_code_hash'])
             await self.finalize_login(user_id, client)
             return True, "✅ **Успешный вход!** Worker запущен.", client
