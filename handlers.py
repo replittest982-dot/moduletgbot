@@ -14,7 +14,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
 
-# ✅ 1. УДАЛЕН ИМПОРТ: from config import QR_TIMEOUT (теперь только ADMIN_ID в main.py)
+# ✅ ИМПОРТЫ ПРОЕКТА (константы будут взяты из kwargs)
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
 
@@ -24,7 +24,7 @@ admin_router = Router()
 router = Router() 
 logger = logging.getLogger(__name__)
 
-# --- FSM СОСТОЯНИЯ (без изменений) ---
+# --- FSM СОСТОЯНИЯ ---
 
 class UserState(StatesGroup):
     waiting_promo = State()
@@ -40,7 +40,7 @@ class TelethonAuth(StatesGroup):
     waiting_for_qr = State()
     qr_password = State()
 
-# --- ФУНКЦИИ (без изменений) ---
+# --- ФУНКЦИИ ---
 
 def generate_random_code(length=10) -> str:
     """Генерирует случайный код из букв и цифр."""
@@ -59,10 +59,11 @@ async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     """ЗАМЕНИ НА СВОЮ ЛОГИКУ МЕНЮ"""
     await bot.send_message(user_id, "✅ Главное меню (замени эту функцию!)")
 
-# --- АДМИН-ПАНЕЛЬ (без изменений) ---
+# --- АДМИН-ПАНЕЛЬ ---
 
 @admin_router.callback_query(F.data == "admin_panel")
 async def cb_admin(callback: CallbackQuery, **kwargs):
+    """Отображает Админ-Панель."""
     admin_id: int = kwargs["dp"]["admin_id"]
     if callback.from_user.id != admin_id:
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
@@ -75,6 +76,7 @@ async def cb_admin(callback: CallbackQuery, **kwargs):
 
 @admin_router.callback_query(F.data == "admin_give_sub")
 async def cb_admin_give_sub_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+    """Начало FSM для выдачи подписки."""
     admin_id: int = kwargs["dp"]["admin_id"]
     if callback.from_user.id != admin_id: return
     
@@ -84,6 +86,7 @@ async def cb_admin_give_sub_start(callback: CallbackQuery, state: FSMContext, **
 
 @admin_router.message(AdminState.waiting_give_sub)
 async def admin_give_sub_proc(message: Message, state: FSMContext, **kwargs):
+    """Обработка ввода данных для выдачи подписки."""
     bot: Bot = kwargs["bot"]
     db: AsyncDatabase = kwargs["dp"]["db"]
     tm: TelethonManager = kwargs["dp"]["tm"]
@@ -129,6 +132,7 @@ async def admin_give_sub_proc(message: Message, state: FSMContext, **kwargs):
 
 @admin_router.callback_query(F.data == "admin_create_promo")
 async def cb_admin_create_promo_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+    """Начало FSM для создания промокода."""
     admin_id: int = kwargs["dp"]["admin_id"]
     if callback.from_user.id != admin_id: return
     
@@ -138,6 +142,7 @@ async def cb_admin_create_promo_start(callback: CallbackQuery, state: FSMContext
 
 @admin_router.message(AdminState.waiting_promo_params)
 async def admin_create_promo_proc(message: Message, state: FSMContext, **kwargs):
+    """Обработка ввода параметров промокода."""
     db: AsyncDatabase = kwargs["dp"]["db"]
     bot: Bot = kwargs["bot"]
     tm: TelethonManager = kwargs["dp"]["tm"]
@@ -168,14 +173,10 @@ async def admin_create_promo_proc(message: Message, state: FSMContext, **kwargs)
 
 @user_router.callback_query(F.data == "auth_qr")
 async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
-    """
-    ✅ 2. ФИКС: Получение qr_timeout из kwargs.
-    Инициация QR-авторизации и генерация QR-кода.
-    """
+    """Инициация QR-авторизации и генерация QR-кода."""
     tm: TelethonManager = kwargs["dp"]["tm"]
     bot: Bot = kwargs["bot"]
     db: AsyncDatabase = kwargs["dp"]["db"]
-    # ✅ Получаем таймаут. Используем .get с дефолтом 120, если в main.py забыли передать.
     qr_timeout: int = kwargs["dp"].get("qr_timeout", 120) 
 
     await callback.answer("🔄 Генерация QR-кода...")
@@ -203,7 +204,6 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
         logger.error(f"Error generating QR code image: {e}")
         return await callback.message.answer("❌ Не удалось сгенерировать QR-код.")
     
-    # ✅ 3. Используем переменную qr_timeout в caption
     await callback.message.answer_photo(
         photo=InputFile.from_bytes(bio.getvalue(), filename="qr.png"),
         caption=f"📱 Отсканируйте QR-код!\n⏰ Действует **{qr_timeout}с**"
@@ -213,10 +213,11 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
     logger.info(f"QR started for {callback.from_user.id}")
 
 
-# --- ЕДИНЫЙ ERROR HANDLER (без изменений) ---
+# --- ЕДИНЫЙ ERROR HANDLER ---
 
 @router.errors()
 async def errors_handler(event: ErrorEvent):
+    """Обработчик всех исключений."""
     exc = event.exception
     
     user_id = getattr(getattr(event.update, 'effective_user', None), 'id', 'неизвестно')
