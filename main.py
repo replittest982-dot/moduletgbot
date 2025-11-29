@@ -3,7 +3,10 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import BOT_TOKEN, ADMIN_ID, QR_TIMEOUT # QR_TIMEOUT остается в импорте
+# ✅ Импортируем config как модуль для TelethonManager
+import config 
+# Импортируем переменные для удобства
+from config import BOT_TOKEN, ADMIN_ID, QR_TIMEOUT 
 from handlers import user_router, admin_router, router
 from db import AsyncDatabase
 from telethon_manager import TelethonManager
@@ -16,27 +19,30 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     
-    # --- ИНИЦИАЛИЗАЦИЯ КЛЮЧЕВЫХ ОБЪЕКТОВ ---
+    # --- 1. ИНИЦИАЛИЗАЦИЯ КЛЮЧЕВЫХ ОБЪЕКТОВ ---
     db = AsyncDatabase()
-    tm = TelethonManager()
+    
+    # ✅ ФИКС: Передаем обязательные аргументы db и config в TelethonManager
+    tm = TelethonManager(db=db, config=config) 
+    
     await db.init()
     logger.info("Database initialized successfully.")
     
-    # --- ПЕРЕДАЧА ГЛОБАЛЬНЫХ ОБЪЕКТОВ В КОНТЕКСТ DP ---
+    # --- 2. ПЕРЕДАЧА ГЛОБАЛЬНЫХ ОБЪЕКТОВ В КОНТЕКСТ DP ---
+    # Все объекты и константы доступны в хендлерах через kwargs["dp"]["key"]
     dp["db"] = db
     dp["tm"] = tm
     dp["admin_id"] = ADMIN_ID 
-    # ✅ ДОБАВЛЕНИЕ QR_TIMEOUT В КОНТЕКСТ ДП
     dp["qr_timeout"] = QR_TIMEOUT 
     
-    # --- РЕГИСТРАЦИЯ РОУТЕРОВ ---
+    # --- 3. РЕГИСТРАЦИЯ РОУТЕРОВ ---
     dp.include_router(user_router)
     dp.include_router(admin_router)
     dp.include_router(router)
     
     logger.info("Starting bot...")
     
-    # --- СТАРТ ПОЛЛИНГА И ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ ---
+    # --- 4. СТАРТ ПОЛЛИНГА И ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ ---
     try:
         await dp.start_polling(bot)
     finally:
