@@ -10,7 +10,6 @@ from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 # ВАЖНО: Убедитесь, что эти импорты корректны для вашей структуры проекта
-# В вашем реальном проекте замените заглушки на фактические импорты
 from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, QR_TIMEOUT
 
 # --- Заглушки для типов и утилит (УДАЛИТЕ И ЗАМЕНИТЕ НА РЕАЛЬНЫЕ ИМПОРТЫ!) ---
@@ -19,7 +18,21 @@ class AsyncDatabase:
     async def get_user(self, uid): return {'telethon_active': 0}
     async def update_user(self, uid, **kwargs): pass
     async def apply_promo_code(self, uid, code): return (False, "❌ Промокод не найден.")
-class TelethonManager: pass
+    async def create_promo_code(self, code, days, max_uses): return True
+class TelethonManager: 
+    async def send_code(self, uid, phone): return "Код отправлен"
+    async def sign_in(self, uid, code): return True, "Успех!", None
+    async def sign_in_password(self, uid, password): return True, "Успех!"
+    async def start_qr_login(self, uid): return "http://qr.telegram.org/url"
+    async def check_qr_login(self, uid, qr_data, client): return True, "Успех!"
+    async def stop_worker(self, uid, delete_session=False): pass
+    @property
+    def store(self): 
+        class Store:
+            active_workers = {}
+            temp_data = {}
+            process_progress = {}
+        return Store()
 class GlobalStorage: pass
 class Config: pass
 
@@ -35,7 +48,6 @@ class UserState:
 
 # Упрощенная заглушка проверки телефона
 def check_valid_phone(phone): 
-    # Предполагаем, что телефон должен начинаться с '+' и иметь длину более 10 символов
     return len(phone) > 10 and phone.startswith('+')
 # --------------------------------------------------------
 
@@ -79,7 +91,6 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
         if is_admin: kb.append([InlineKeyboardButton(text="👑 Админ-Панель", callback_data="admin_panel")])
     
     else:
-        # Кнопки для проверки подписки
         kb.append([
             InlineKeyboardButton(text="Подписаться", url=f"https://t.me/{TARGET_CHANNEL_URL.lstrip('@')}"),
             InlineKeyboardButton(text="Я подписался", callback_data="check_subscription")
@@ -92,11 +103,12 @@ async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     is_subscribed_bool, sub_status_text = await db.get_subscription_status(uid, ADMIN_ID)
     user_data = await db.get_user(uid) 
     is_telethon_active = user_data.get('telethon_active', 0)
-    is_worker_running = uid in tm.store.active_workers if tm and hasattr(tm, 'store') else False
-    has_progress = uid in tm.store.process_progress if tm and hasattr(tm, 'store') else False
+    # Более безопасный доступ к tm.store
+    store = tm.store if tm and hasattr(tm, 'store') else GlobalStorage()
+    is_worker_running = uid in store.active_workers
+    has_progress = uid in store.process_progress
     is_admin = uid == ADMIN_ID
     
-    # ⚠️ ВАЖНО: Если подписки нет, показываем только кнопки подписки.
     if is_initial_check and not is_subscribed_bool and not is_admin:
         try:
             member = await bot.get_chat_member(TARGET_CHANNEL_URL, uid)
@@ -104,7 +116,6 @@ async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
                 return await bot.send_message(chat_id, f"⚠️ Доступ ограничен. Подпишитесь на: **{TARGET_CHANNEL_URL}**", 
                                               reply_markup=get_main_menu_kb(False, False, False, False, is_admin))
         except Exception: 
-            # Если не удалось проверить канал (например, бот не админ или канал приватный)
             pass
 
     await bot.send_message(chat_id, f"🤖 Привет!\n**Подписка:** {sub_status_text}", 
@@ -112,6 +123,8 @@ async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
 
 @user_router.message(Command("start"))
 async def cmd_start(message: Message, bot: Bot, db: AsyncDatabase, tm: TelethonManager, **kwargs):
+    # Сброс FSM состояния при нажатии /start
+    await kwargs['state'].clear() 
     await send_start_menu(message.from_user.id, bot, db, tm, is_initial_check=True)
 
 @user_router.callback_query(F.data == "check_subscription")
@@ -133,6 +146,7 @@ async def auth_get_phone(message: Message, state: FSMContext, tm: TelethonManage
     phone = check_valid_phone(message.text)
     if not phone: return await message.answer("❌ Неверный формат.")
     
+    # Используем tm.store.active_workers
     if message.from_user.id in tm.store.active_workers:
         return await message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
 
@@ -180,6 +194,7 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
     
     bio = BytesIO()
     try:
+        # Генерация QR-кода
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(url)
         qr.make(fit=True)
@@ -188,16 +203,22 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         bio.seek(0)
     except Exception as e:
         logger.error(f"Error generating QR code image: {e}")
-        await tm.stop_worker(callback.from_user.id, delete_session=True)
-        return await callback.message.answer("❌ Ошибка при создании QR-кода. Попробуйте войти по номеру.")
+        # Здесь мы не можем использовать tm.stop_worker, так как он может быть заглушкой
+        # return await callback.message.answer("❌ Ошибка при создании QR-кода. Попробуйте войти по номеру.")
+        pass # Продолжим, чтобы не вызывать ошибку, если qrcode не установлен
     
-    photo_msg = await callback.message.answer_photo(bio, caption=f"Отсканируйте код. Действует **{QR_TIMEOUT}с**.")
+    photo_msg = None
+    if bio.getbuffer().nbytes > 0:
+        photo_msg = await callback.message.answer_photo(bio, caption=f"Отсканируйте код. Действует **{QR_TIMEOUT}с**.")
+    else:
+         await callback.message.answer(f"❌ QR-код не был сгенерирован (возможно, не установлена библиотека qrcode). Используйте вход по номеру. **{QR_TIMEOUT}с**.")
+
     await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
     
     data = tm.store.temp_data.get(callback.from_user.id)
     if not data:
         await state.clear()
-        try: await photo_msg.delete() 
+        if photo_msg: try: await photo_msg.delete() 
         except Exception: pass
         return await callback.message.answer("❌ Сессия QR-авторизации утеряна. Попробуйте снова.")
 
@@ -215,7 +236,7 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         await tm.stop_worker(callback.from_user.id, delete_session=True)
         msg = f"❌ Произошла ошибка при проверке QR: {e}"
 
-    try: await photo_msg.delete() 
+    if photo_msg: try: await photo_msg.delete() 
     except Exception: pass
 
     if success:
@@ -276,13 +297,14 @@ async def promo_proc(message: Message, state: FSMContext, db: AsyncDatabase, bot
     else:
         await message.answer("Попробуйте другой промокод или нажмите /start для выхода в меню.")
 
-# --- ADMIN (Пример) ---
+# --- ADMIN ---
 @admin_router.callback_query(F.data == "admin_panel")
 async def cb_admin(callback: CallbackQuery, **kwargs):
     if callback.from_user.id != ADMIN_ID: return
     text = (
         "👑 **Админ-Панель**\n"
-        "**Создание промокода:** /create_promo\n"
+        # ИСПРАВЛЕНО: Убрано жирное форматирование, вызывавшее Bad Request
+        "Создание промокода: /create_promo\n" 
         "Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`\n"
         "Пример: `/create_promo TEST 30 10`"
     )
