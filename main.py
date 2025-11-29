@@ -63,6 +63,7 @@ async def on_startup(dispatcher: Dispatcher, bot: Bot):
     active_users = await db.get_active_telethon_users() 
     for uid in active_users:
         if await db.check_subscription(uid): 
+            # Запускаем таску, чтобы не блокировать запуск
             asyncio.create_task(tm.start_client_task(uid)) 
         else:
             await db.set_telethon_status(uid, False) 
