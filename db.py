@@ -21,7 +21,8 @@ def format_timedelta(td: timedelta) -> str:
         if seconds >= value:
             num = seconds // value
             seconds %= value
-            parts.append(f"{num} {period}{'а' if num % 10 in [2,3,4] and num % 100 not in [12,13,14] else ''}{'ов' if num % 10 == 0 or num % 10 in [5,6,7,8,9,0] or (10 <= num % 100 <= 20) else ''}")
+            # Упрощенная логика склонения для примера
+            parts.append(f"{num} {period}") 
     return ", ".join(parts[:2]) if parts else "меньше секунды"
 
 
@@ -31,6 +32,7 @@ class AsyncDatabase:
         self.conn: aiosqlite.Connection = None 
 
     async def init(self):
+        """Инициализация, подключение и создание таблиц."""
         if self.conn is None:
             self.conn = await aiosqlite.connect(self.db_path) 
             
@@ -39,7 +41,7 @@ class AsyncDatabase:
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     telethon_active INTEGER DEFAULT 0,
-                    session_str TEXT,  # ✅ ИСПРАВЛЕНИЕ 3: Добавлен столбец
+                    session_str TEXT, 
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
                 )
             """)
@@ -74,7 +76,6 @@ class AsyncDatabase:
 
             await self.conn.commit()
 
-    # ✅ ИСПРАВЛЕНИЕ 6: Метод закрытия
     async def close(self):
         if self.conn:
             await self.conn.close()
@@ -89,7 +90,6 @@ class AsyncDatabase:
                 return dict(zip(columns, row))
             return None
 
-    # ✅ ИСПРАВЛЕНИЕ 8: Защита от SQL Injection
     async def update_user(self, user_id: int, **kwargs):
         if not kwargs: return 
         async with self.conn:
@@ -113,7 +113,6 @@ class AsyncDatabase:
             if row and row[0]:
                 end_date_str = row[0]
                 try:
-                    # ✅ ИСПРАВЛЕНИЕ 7: Обработка часового пояса
                     naive_dt = parser.parse(end_date_str)
                     return MOSCOW_TZ.localize(naive_dt)
                 except Exception as e:
@@ -134,7 +133,6 @@ class AsyncDatabase:
         
         return False, "🔴 Не активна"
 
-    # ✅ ИСПРАВЛЕНИЕ 18: Использование транзакции
     async def apply_promo_code(self, user_id: int, code: str) -> tuple[bool, str]:
         code = code.upper()
         async with self.conn:
@@ -179,7 +177,6 @@ class AsyncDatabase:
                 logger.error(f"Error creating promo code: {e}")
                 return False
     
-    # ✅ ИСПРАВЛЕНИЕ 20: INSERT OR REPLACE
     async def update_drop_session(self, user_id: int, pc_name: str, phone: str = None) -> None:
         async with self.conn:
             await self.conn.execute("""
