@@ -10,7 +10,6 @@ from aiogram.types import Update, Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.filters.state import StateFilter
-# 🟢 ИСПРАВЛЕНО: Добавлены импорты для FSM
 from aiogram.fsm.state import StatesGroup, State 
 
 # --- LOCAL IMPORTS ---
@@ -38,6 +37,8 @@ class RateLimitMiddleware(BaseMiddleware):
         now = asyncio.get_event_loop().time()
         if uid in self.last_request and now - self.last_request[uid] < self.limit: return 
         self.last_request[uid] = now
+        # 🟢 Внедряем зависимости в data (или kwargs), чтобы они были доступны в обработчиках
+        data.update(user_router.kwargs) 
         return await handler(event, data)
 
 def get_user_id_from_update(update: Update) -> Optional[int]:
@@ -56,7 +57,12 @@ def check_valid_phone(phone: str) -> Optional[str]:
 # =========================================================================
 
 @user_router.message(Command("start"))
-async def cmd_start(message: Message, db, tm, store):
+async def cmd_start(message: Message, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    db = kwargs.get('db')
+    tm = kwargs.get('tm')
+    store = kwargs.get('store')
+
     uid = message.from_user.id
     is_subscribed = await db.check_subscription(uid)
     
@@ -86,15 +92,21 @@ async def cmd_start(message: Message, db, tm, store):
     await message.answer(text, parse_mode='Markdown')
 
 @user_router.message(Command("logout"))
-async def cmd_logout(message: Message, tm):
+async def cmd_logout(message: Message, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    tm = kwargs.get('tm')
     await tm.stop_worker(message.from_user.id)
+
 
 # =========================================================================
 # II. ЛОГИКА АВТОРИЗАЦИИ TELETHON (/login)
 # =========================================================================
 
 @user_router.message(Command("login"))
-async def cmd_login(message: Message, tm, state: FSMContext):
+async def cmd_login(message: Message, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    tm = kwargs.get('tm')
+
     uid = message.from_user.id
     await state.clear()
     
@@ -107,7 +119,10 @@ async def cmd_login(message: Message, tm, state: FSMContext):
         await message.answer("📞 **Введите номер телефона** для авторизации (например, `+79xxxxxxxxxx`):")
 
 @user_router.message(StateFilter(TelethonAuth.phone))
-async def auth_get_phone(message: Message, tm, state: FSMContext):
+async def auth_get_phone(message: Message, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    tm = kwargs.get('tm')
+
     uid = message.from_user.id
     phone = check_valid_phone(message.text)
     
@@ -124,7 +139,11 @@ async def auth_get_phone(message: Message, tm, state: FSMContext):
     await message.answer(f"✅ Код отправлен на **{phone}**. Введите его:")
 
 @user_router.message(StateFilter(TelethonAuth.code))
-async def auth_get_code(message: Message, tm, state: FSMContext, store):
+async def auth_get_code(message: Message, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    tm = kwargs.get('tm')
+    store = kwargs.get('store')
+
     uid = message.from_user.id
     code = message.text.strip()
     temp_data = store.store.get(uid)
@@ -150,7 +169,10 @@ async def auth_get_code(message: Message, tm, state: FSMContext, store):
         return await message.answer(result_msg)
 
 @user_router.message(StateFilter(TelethonAuth.password))
-async def auth_get_password(message: Message, tm, state: FSMContext):
+async def auth_get_password(message: Message, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    tm = kwargs.get('tm')
+
     uid = message.from_user.id
     password = message.text.strip()
     
@@ -178,15 +200,24 @@ async def cmd_promo(message: Message, state: FSMContext):
     await message.answer("🔑 **Введите ваш промокод** для активации подписки:")
 
 @user_router.message(PromoState.waiting_for_code)
-async def process_promo_code(message: Message, db, state: FSMContext):
+async def process_promo_code(message: Message, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    db = kwargs.get('db')
+
     code = message.text.strip().upper() 
-    await state.clear()
+    
+    # ⚠️ Улучшение UX: state.clear() перенесено ниже, чтобы пользователь мог исправить ошибку
     
     success, result_msg = await db.apply_promo_code(message.from_user.id, code)
     
     await message.answer(result_msg, parse_mode='Markdown')
+    
     if success:
+        await state.clear()
         await message.answer("Для запуска воркера используйте команду /login.")
+    else:
+        # Если ошибка, не сбрасываем состояние, чтобы пользователь мог ввести код снова
+        await message.answer("Попробуйте ввести другой код или введите /promo для отмены.")
 
 
 # =========================================================================
@@ -197,7 +228,10 @@ class AdminState(StatesGroup):
     creating_promo_code = State()
 
 @admin_router.message(Command("admin"))
-async def cmd_admin(message: Message, tm):
+async def cmd_admin(message: Message, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    tm = kwargs.get('tm')
+
     if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ **Доступ запрещен.**")
         
@@ -219,10 +253,13 @@ async def cmd_create_promo(message: Message, state: FSMContext):
                          "Пример: `TEST20 20 50`")
 
 @admin_router.message(AdminState.creating_promo_code)
-async def process_create_promo(message: Message, db, state: FSMContext):
+async def process_create_promo(message: Message, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
+    db = kwargs.get('db')
+
     if message.from_user.id != ADMIN_ID: return
     
-    await state.clear()
+    # ⚠️ Улучшение UX: state.clear() перенесено ниже
     
     parts = message.text.split()
     if len(parts) != 3:
@@ -241,7 +278,8 @@ async def process_create_promo(message: Message, db, state: FSMContext):
     success = await db.create_promo_code(code, days, max_uses)
     
     if success:
+        await state.clear()
         await message.answer(f"✅ Промокод **`{code}`** успешно создан!\n"
                              f"Дней: {days}, Лимит: {max_uses}.", parse_mode='Markdown')
     else:
-        await message.answer("❌ Промокод с таким кодом уже существует.")
+        await message.answer("❌ Промокод с таким кодом уже существует. Попробуйте другой код.")
