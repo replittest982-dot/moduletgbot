@@ -4,8 +4,9 @@ from typing import Optional, List, Tuple
 from dateutil import parser
 import logging
 
-from .config import MOSCOW_TZ, DB_PATH
-from .utils import format_timedelta # Импортируем из utils
+# УБРАНЫ ТОЧКИ ПЕРЕД ИМЕНАМИ МОДУЛЕЙ
+from config import MOSCOW_TZ, DB_PATH, ADMIN_ID
+from utils import format_timedelta 
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,6 @@ class AsyncDatabase:
         return await cursor.fetchone()
 
     async def update_user(self, user_id: int, **kwargs):
-        # ... (логика обновления пользователя, как в монолите) ...
         set_parts = [f"{k} = ?" for k in kwargs]
         values = list(kwargs.values())
         values.append(user_id)
@@ -128,7 +128,6 @@ class AsyncDatabase:
     # --- Promo Codes ---
         
     async def apply_promo_code(self, user_id: int, code: str) -> Tuple[bool, str]:
-        # ... (логика применения промокода, как в монолите) ...
         cursor = await self.conn.execute(
             "SELECT days, is_active, max_uses, current_uses FROM promo_codes WHERE code = ?", (code.upper(),)
         )
@@ -181,7 +180,6 @@ class AsyncDatabase:
     # --- DROP_SESSIONS Methods ---
     
     async def create_drop_session(self, pc_name: str, drop_id: int):
-        # ... (логика создания drop-сессии, как в монолите) ...
         now_str = datetime.datetime.now(MOSCOW_TZ).isoformat()
         phone_flag = f"TEMP_{pc_name}_{drop_id}_{int(datetime.datetime.now().timestamp())}"
         
@@ -192,8 +190,7 @@ class AsyncDatabase:
         await self.conn.commit()
         return phone_flag
 
-    async def update_drop_session(self, current_phone: str, new_phone: Optional[str] = None, status: Optional[str] = None, pc_name: Optional[str] = None, drop_id: Optional[int] = None):
-        # ... (логика обновления drop-сессии, как в монолите) ...
+    async def update_drop_session(self, current_phone: str, new_phone: Optional[str] = None, status: Optional[str] = None):
         cursor = await self.conn.execute("SELECT * FROM drop_sessions WHERE phone = ?", (current_phone,))
         row = await cursor.fetchone()
         if not row: return False, "❌ Сессия не найдена."
@@ -209,7 +206,11 @@ class AsyncDatabase:
             update_parts['phone'] = new_phone
         
         if status and status != current_data['status']:
-            last_status_time = parser.isoparse(current_data['last_status_time']).astimezone(MOSCOW_TZ)
+            try:
+                last_status_time = parser.isoparse(current_data['last_status_time']).astimezone(MOSCOW_TZ)
+            except:
+                last_status_time = now_aware
+
             IDLE_STATUSES = ["дайте номер", "error", "slet", "замена", "повтор"]
 
             if current_data['status'] in IDLE_STATUSES and status == "в работе":
@@ -224,7 +225,13 @@ class AsyncDatabase:
             if 'phone' in update_parts and update_parts['phone'] != current_phone:
                 keys = list(current_data.keys())
                 values = list(current_data.values())
-                await self.conn.execute(f"INSERT INTO drop_sessions ({', '.join(keys)}) VALUES ({', '.join(['?'] * len(keys))})", values)
+                # Обновляем значения в списке values на новые из update_parts
+                for k, v in update_parts.items():
+                    if k in keys:
+                        values[keys.index(k)] = v
+                        
+                placeholders = ', '.join(['?'] * len(keys))
+                await self.conn.execute(f"INSERT INTO drop_sessions ({', '.join(keys)}) VALUES ({placeholders})", values)
             else:
                 set_parts = [f"{k} = ?" for k in update_parts.keys()]
                 values = list(update_parts.values())
