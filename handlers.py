@@ -13,9 +13,8 @@ from aiogram.filters.state import StateFilter
 from aiogram.fsm.state import StatesGroup, State 
 
 # --- LOCAL IMPORTS ---
-# 🟢 ИСПРАВЛЕНИЕ: Импортируем SESSION_DIR из config, как и положено
 from telethon_manager import TelethonAuth 
-from config import ADMIN_ID, SESSION_DIR
+from config import ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
@@ -24,19 +23,21 @@ user_router = Router(name="user_router")
 admin_router = Router(name="admin_router")
 drop_router = Router(name="drop_router")
 
-# --- MIDDLEWARE & HELPERS ---
+# =========================================================================
+# I. MIDDLEWARE & HELPERS
+# =========================================================================
 
-# 🟢 НОВЫЙ MIDDLEWARE: Для внедрения зависимостей в data хендлеров
+# MIDDLEWARE ДЛЯ ВНЕДРЕНИЯ ЗАВИСИМОСТЕЙ
 class DependencyInjectorMiddleware(BaseMiddleware):
     def __init__(self, data: Dict[str, Any]):
         self.data = data
         super().__init__()
 
     async def __call__(self, handler, event: Update, data: Dict[str, Any]):
-        data.update(self.data) # Внедряем db, tm, store, и т.д.
+        data.update(self.data) 
         return await handler(event, data)
 
-# 🟢 ИСПРАВЛЕННЫЙ MIDDLEWARE: Только для RateLimit, не трогает внедрение зависимостей
+# MIDDLEWARE ДЛЯ RateLimit
 class RateLimitMiddleware(BaseMiddleware):
     def __init__(self, store, limit=0.5):
         self.store = store
@@ -49,7 +50,6 @@ class RateLimitMiddleware(BaseMiddleware):
         if uid is None: return await handler(event, data)
         now = asyncio.get_event_loop().time()
         
-        # Если прошло слишком мало времени, блокируем
         if uid in self.last_request and now - self.last_request[uid] < self.limit: return 
         
         self.last_request[uid] = now
@@ -67,7 +67,7 @@ def check_valid_phone(phone: str) -> Optional[str]:
     return None
 
 # =========================================================================
-# I. ОБЩИЕ КОМАНДЫ И НАВИГАЦИЯ
+# II. ОБЩИЕ КОМАНДЫ И НАВИГАЦИЯ
 # =========================================================================
 
 # 🟢 STATES
@@ -77,10 +77,11 @@ class PromoState(StatesGroup):
 class AdminState(StatesGroup):
     creating_promo_code = State()
 
-# 🟢 INLINE KEYBOARD (Пример)
-inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🔑 Авторизация", callback_data="login_action")],
-    [InlineKeyboardButton(text="🎁 Промокод", callback_data="promo_action")],
+# 🟢 INLINE KEYBOARD (Кнопки для меню /start)
+MENU_KB = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🔑 Авторизация (Login)", callback_data="login_action")],
+    [InlineKeyboardButton(text="🎁 Активировать промокод", callback_data="promo_action")],
+    [InlineKeyboardButton(text="❌ Выход (Logout)", callback_data="logout_action")],
 ])
 
 
@@ -88,7 +89,6 @@ inline_kb = InlineKeyboardMarkup(inline_keyboard=[
 async def cmd_start(message: Message, **kwargs):
     db = kwargs.get('db')
     tm = kwargs.get('tm')
-    store = kwargs.get('store')
 
     uid = message.from_user.id
     is_subscribed = await db.check_subscription(uid)
@@ -104,7 +104,7 @@ async def cmd_start(message: Message, **kwargs):
         if uid in tm.store.active_clients:
             status_text += "🟢 **Воркер Telethon запущен.**"
         else:
-            status_text += "🔴 **Воркер Telethon остановлен.** Используйте /login для запуска."
+            status_text += "🔴 **Воркер Telethon остановлен.** Нажмите 'Авторизация'."
     else:
         status_text = (
             "⚠️ **Подписка не активна.**\n"
@@ -114,29 +114,41 @@ async def cmd_start(message: Message, **kwargs):
     text = (
         f"🤖 Привет, **{message.from_user.full_name}**!\n"
         f"{status_text}\n"
-        f"Выберите действие ниже."
+        f"Выберите действие ниже (или используйте команды /login, /promo, /logout)."
     )
-    await message.answer(text, parse_mode='Markdown', reply_markup=inline_kb)
+    await message.answer(text, parse_mode='Markdown', reply_markup=MENU_KB)
 
 @user_router.message(Command("logout"))
 async def cmd_logout(message: Message, **kwargs):
     tm = kwargs.get('tm')
     await tm.stop_worker(message.from_user.id)
+    await message.answer("🚪 **Вы успешно вышли из Telethon-сессии.**")
     
 # 🟢 ОБРАБОТЧИКИ ДЛЯ INLINE КНОПОК
+
 @user_router.callback_query(F.data == "login_action")
-async def cb_login_action(callback: CallbackQuery, **kwargs):
-    await callback.answer()
-    await cmd_login(callback.message, callback.bot.state, **kwargs)
+async def cb_login_action(callback: CallbackQuery, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: state теперь в сигнатуре, что решает ошибку Bot has no attribute 'state'
+    await callback.answer("Переход к авторизации...")
+    await cmd_login(callback.message, state, **kwargs) 
 
 @user_router.callback_query(F.data == "promo_action")
-async def cb_promo_action(callback: CallbackQuery, **kwargs):
-    await callback.answer()
-    await cmd_promo(callback.message, callback.bot.state) # FSM state передается автоматически
+async def cb_promo_action(callback: CallbackQuery, state: FSMContext, **kwargs):
+    # 🟢 ИСПРАВЛЕНИЕ: state теперь в сигнатуре
+    await callback.answer("Переход к вводу промокода...")
+    await cmd_promo(callback.message, state, **kwargs) 
+    
+@user_router.callback_query(F.data == "logout_action")
+async def cb_logout_action(callback: CallbackQuery, **kwargs):
+    await callback.answer("Выход из сессии...")
+    await cmd_logout(callback.message, **kwargs) 
+
 
 # =========================================================================
-# II. ЛОГИКА АВТОРИЗАЦИИ TELETHON (/login)
+# III. ЛОГИКА АВТОРИЗАЦИИ TELETHON (/login)
 # =========================================================================
+# ВНИМАНИЕ: Если ошибка "unexpected keyword argument 'phone_hash'" останется, 
+# вам нужно исправить telethon_manager.py, заменив phone_hash на phone_code_hash в вызове client.sign_in()
 
 @user_router.message(Command("login"))
 async def cmd_login(message: Message, state: FSMContext, **kwargs):
@@ -219,11 +231,12 @@ async def auth_get_password(message: Message, state: FSMContext, **kwargs):
 
 
 # =========================================================================
-# III. ПРОМОКОДЫ
+# IV. ПРОМОКОДЫ
 # =========================================================================
 
 @user_router.message(Command("promo"))
-async def cmd_promo(message: Message, state: FSMContext):
+async def cmd_promo(message: Message, state: FSMContext, **kwargs):
+    # 🟢 Добавил **kwargs для универсальности
     await state.set_state(PromoState.waiting_for_code)
     await message.answer("🔑 **Введите ваш промокод** для активации подписки:")
 
@@ -239,19 +252,17 @@ async def process_promo_code(message: Message, state: FSMContext, **kwargs):
     
     if success:
         await state.clear()
-        await message.answer("Для запуска воркера используйте команду /login.")
+        await message.answer("Для запуска воркера используйте команду /login или кнопку 'Авторизация'.")
     else:
         await message.answer("Попробуйте ввести другой код или введите /promo для отмены.")
 
 
 # =========================================================================
-# IV. АДМИН-ПАНЕЛЬ
+# V. АДМИН-ПАНЕЛЬ
 # =========================================================================
 
 @admin_router.message(Command("admin"))
 async def cmd_admin(message: Message, **kwargs):
-    tm = kwargs.get('tm')
-
     if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ **Доступ запрещен.**")
         
