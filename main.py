@@ -2,7 +2,6 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.fsm.storage.memory import MemoryStorage
-# 💡 ИСПРАВЛЕНИЕ: Добавлен импорт DefaultBotProperties для корректной установки parse_mode
 from aiogram.client.default import DefaultBotProperties
 
 # 💡 ВАЖНО: Убедитесь, что вы импортируете все нужные файлы
@@ -28,16 +27,17 @@ class GlobalStorage:
         self.drop_mapping = {}
 # ------------------------------------------------------------------------
 
+# 1. Настройка логирования и ОПРЕДЕЛЕНИЕ logger
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__) # <-- ИСПРАВЛЕНИЕ: Переменная logger теперь определена
 
 async def main():
-    # 1. Инициализация
-    
+    # 2. Инициализация объектов
     db = AsyncDatabase() 
     await db.init()
     store = GlobalStorage()
     
-    # 🚀 ИСПРАВЛЕНИЕ: Создание объекта конфигурации для TelethonManager (для TEMP_DIR)
+    # Создание объекта конфигурации для TelethonManager
     class Config:
         API_ID = API_ID
         API_HASH = API_HASH
@@ -45,21 +45,19 @@ async def main():
     
     config = Config()
 
-    # 2. Инициализация TelethonManager
+    # Инициализация TelethonManager
     tm = TelethonManager(db, store, config) 
     
-    # 3. Инициализация Aiogram
-    # 🚀 ИСПРАВЛЕНИЕ: Используем DefaultBotProperties для установки parse_mode
+    # Инициализация Aiogram
     default_properties = DefaultBotProperties(parse_mode='Markdown') 
     bot = Bot(token=BOT_TOKEN, default=default_properties)
     
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
-    # 4. Инжекция зависимостей и роутеры
+    # 3. Инжекция зависимостей и роутеры
     dp.workflow_data.update(db=db, tm=tm, store=store, config=config, bot=bot)
 
-    # Регистрация роутеров
     dp.include_router(user_router)
     
     admin_router.message.filter(F.from_user.id == ADMIN_ID)
@@ -67,15 +65,14 @@ async def main():
     dp.include_router(admin_router)
     dp.include_router(drop_router)
     
-    # 5. Запуск
-    logger.info("Bot is starting...")
+    # 4. Запуск
+    logger.info("Bot is starting...") # <-- Используем logger
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.warning("Bot stopped by user.")
+        logger.warning("Bot stopped by user.")
     except Exception as e:
-        # Добавляем exc_info=True для полного трассировки ошибки
-        logging.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"Fatal error: {e}", exc_info=True)
