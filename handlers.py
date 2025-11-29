@@ -8,7 +8,7 @@ from typing import Any
 
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart # ✅ ДОБАВЛЕН ИМПОРТ CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
@@ -58,6 +58,22 @@ def get_admin_panel_kb() -> InlineKeyboardMarkup:
 async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: TelethonManager, force_main: bool = False):
     """ЗАМЕНИ НА СВОЮ ЛОГИКУ МЕНЮ"""
     await bot.send_message(user_id, "✅ Главное меню (замени эту функцию!)")
+
+# --- ОБРАБОТЧИК /START (КРИТИЧЕСКИ ВАЖНЫЙ ФИКС) ---
+
+@user_router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext, **kwargs):
+    """Обрабатывает команду /start и вызывает главное меню."""
+    bot: Bot = kwargs["bot"]
+    db: AsyncDatabase = kwargs["dp"]["db"]
+    tm: TelethonManager = kwargs["dp"]["tm"]
+    
+    # Очищаем состояние
+    await state.clear() 
+    
+    # Вызываем функцию для отображения меню
+    await send_start_menu(message.from_user.id, bot, db, tm)
+
 
 # --- АДМИН-ПАНЕЛЬ ---
 
