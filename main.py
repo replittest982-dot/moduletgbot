@@ -6,7 +6,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.middlewares.base import BaseMiddleware 
 
 from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR, TARGET_CHANNEL_URL, SUPPORT_BOT_USERNAME
-from handlers import user_router, admin_router, drop_router
+# ✅ ИСПРАВЛЕНО: Удален drop_router из импорта
+from handlers import user_router, admin_router 
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
 import set_commands
@@ -57,16 +58,14 @@ async def main():
     dp.startup.register(on_startup) 
     dp.shutdown.register(on_shutdown)
     
-    # ✅ ИСПРАВЛЕНИЕ 2: Удалено store=tm.store
     middleware = DependencyMiddleware(db=db, tm=tm, bot=bot, config=config)
     dp.update.outer_middleware(middleware)
     
     dp.include_router(user_router)
     dp.include_router(admin_router)
-    dp.include_router(drop_router)
+    # ❌ ИСПРАВЛЕНО: drop_router больше не включается
     
     logger.info("Bot is starting...")
-    # ✅ ИСПРАВЛЕНИЕ 6: Удален не поддерживаемый аргумент db=db
     await dp.start_polling(bot) 
 
 if __name__ == "__main__":
