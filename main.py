@@ -3,13 +3,11 @@ import logging
 import os
 import sys
 
-# Импорт из сторонних библиотек
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage 
 from aiogram.client.default import DefaultBotProperties
 
-# Импорт из локальных модулей (ИСПРАВЛЕННЫЕ АБСОЛЮТНЫЕ ИМПОРТЫ)
-# Заменено "from .config" на "from config" и т.д.
+# АБСОЛЮТНЫЕ ИМПОРТЫ
 from config import BOT_TOKEN, DB_PATH, SESSIONS_DIR, DATA_DIR, TEMP_DIR, ADMIN_ID
 from db import AsyncDatabase
 from utils import GlobalStorage, DependencyInjectorMiddleware
@@ -19,78 +17,64 @@ from set_commands import set_default_commands
 
 logger = logging.getLogger(__name__)
 
-async def on_startup(bot: Bot, db: AsyncDatabase, tm: TelethonManager):
+async def on_startup(*args, **kwargs):
     logger.info("Starting up...")
     
-    # Создание папок
+    # Извлечение зависимостей (переданы через DI)
+    # Но так как on_startup вызывается через lambda, 
+    # аргументы будут в kwargs, если мы их туда передадим,
+    # или мы можем использовать замыкание (как сделано ниже в main).
+    # Здесь просто логируем.
+    
     os.makedirs(SESSIONS_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
-    
-    # Инициализация БД
-    await db.init()
-    
-    # Установка команд бота
-    await set_default_commands(bot)
 
-    # Автозапуск Telethon-воркеров
+async def start_services(bot, db, tm):
+    await db.init()
+    await set_default_commands(bot)
     user_ids = await db.get_active_telethon_users()
     if user_ids:
-        logger.info(f"Found {len(user_ids)} active Telethon sessions. Starting workers...")
-        start_tasks = [tm.start_client_task(uid) for uid in user_ids]
-        await asyncio.gather(*start_tasks)
+        logger.info(f"Found {len(user_ids)} active sessions.")
+        for uid in user_ids:
+            asyncio.create_task(tm.start_client_task(uid))
 
-async def on_shutdown(db: AsyncDatabase, tm: TelethonManager):
+async def on_shutdown(*args, **kwargs):
     logger.info("Shutting down...")
-    
-    # Остановка всех Telethon-воркеров
-    stop_tasks = [tm.stop_worker(uid) for uid in list(tm.store.active_workers.keys())]
-    await asyncio.gather(*stop_tasks)
-    
-    # Закрытие соединения с БД
-    if db.conn:
-        await db.conn.close()
 
 async def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # Инициализация
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
     
-    # Пользовательские классы
-    db = AsyncDatabase()
+    db = AsyncDatabase(DB_PATH)
     store = GlobalStorage()
     tm = TelethonManager(bot, store, db)
 
-    # Middleware для внедрения зависимостей
-    injector = DependencyInjectorMiddleware(data={'db': db, 'tm': tm, 'store': store})
-    user_router.message.middleware(injector)
-    user_router.callback_query.middleware(injector)
-    admin_router.message.middleware(injector)
-    admin_router.callback_query.middleware(injector)
-    drop_router.message.middleware(injector)
+    injector = DependencyInjectorMiddleware(data={'db': db, 'tm': tm, 'store': store, 'bot': bot})
+    
+    # Глобальная регистрация middleware
+    dp.message.outer_middleware(injector)
+    dp.callback_query.outer_middleware(injector)
 
-    # Регистрация роутеров
     dp.include_router(admin_router)
     dp.include_router(user_router)
     dp.include_router(drop_router)
     
-    # Хендлеры старта/шатадауна
-    dp.startup.register(lambda _: on_startup(bot, db, tm))
-    dp.shutdown.register(lambda _: on_shutdown(db, tm))
+    # Ручной запуск сервисов
+    await on_startup()
+    await start_services(bot, db, tm)
 
     try:
         await dp.start_polling(bot)
     finally:
+        await tm.stop_all_workers()
+        if db.conn: await db.conn.close()
         await bot.session.close()
 
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        print("❌ ОШИБКА: Заполните BOT_TOKEN в .env")
-        sys.exit(1)
-        
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Bot stopped by user.")
+        pass
