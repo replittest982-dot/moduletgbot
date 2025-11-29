@@ -3,17 +3,15 @@ import datetime
 import asyncio
 import logging
 import re
-import textwrap
 from typing import Dict, Any, Optional, Union, List, Tuple
 from contextlib import suppress
-from dateutil import parser 
 from aiogram.fsm.state import StatesGroup, State 
 from aiogram.types import Message, CallbackQuery
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from telethon import TelegramClient
-import aiosqlite
 
-from .config import SESSIONS_DIR, ADMIN_ID, MOSCOW_TZ
+# АБСОЛЮТНЫЙ ИМПОРТ
+from config import SESSIONS_DIR, ADMIN_ID, MOSCOW_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +72,8 @@ class GlobalStorage:
         temp_path = self.get_temp_session_path(user_id)
         final_path = self.get_session_path(user_id)
         if os.path.exists(temp_path):
+            if os.path.exists(final_path):
+                os.remove(final_path)
             os.rename(temp_path, final_path)
             logger.info(f"Renamed temp session for {user_id} to final.")
             return True
@@ -103,39 +103,6 @@ def format_timedelta(delta: datetime.timedelta) -> str:
     if minutes > 0: parts.append(f"{minutes} м.")
     if seconds > 0 or not parts: parts.append(f"{seconds} с.")
     return " ".join(parts[:3])
-
-async def delete_messages_after(chat_id: Union[int, str], message_ids: Union[int, List[int]], delay: int, bot):
-    await asyncio.sleep(delay)
-    if not isinstance(message_ids, list):
-        message_ids = [message_ids]
-    
-    with suppress(Exception):
-        await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
-
-def format_drop_report(row: aiosqlite.Row) -> str:
-    start_time = parser.isoparse(row['start_time']).astimezone(MOSCOW_TZ)
-    last_status_time = parser.isoparse(row['last_status_time']).astimezone(MOSCOW_TZ)
-    
-    now_aware = datetime.datetime.now(MOSCOW_TZ)
-    
-    total_seconds = int((now_aware - start_time).total_seconds())
-    prosto_seconds = row['prosto_seconds']
-    work_seconds = total_seconds - prosto_seconds
-    
-    return textwrap.dedent(f"""
-    📊 **Отчет по Drop-сессии**
-    
-    **ПК / Дроп:** `{row['pc_name']}` / `{row['drop_id']}`
-    **Номер:** `{row['phone']}`
-    **Текущий статус:** `{row['status']}`
-    
-    **Начало работы:** {start_time.strftime('%d.%m %H:%M:%S')}
-    **Последний статус:** {last_status_time.strftime('%d.%m %H:%M:%S')}
-    
-    **Общее время:** {format_timedelta(datetime.timedelta(seconds=total_seconds))}
-    **Время в работе:** {format_timedelta(datetime.timedelta(seconds=work_seconds))}
-    **Время простоя:** {format_timedelta(datetime.timedelta(seconds=prosto_seconds))}
-    """)
 
 class DependencyInjectorMiddleware(BaseMiddleware):
     """Внедряет db, tm, store во все обработчики через kwargs."""
