@@ -6,15 +6,16 @@ import logging
 
 from aiogram import Router, F
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.types import Update, Message, CallbackQuery
+from aiogram.types import Update, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.filters.state import StateFilter
 from aiogram.fsm.state import StatesGroup, State 
 
 # --- LOCAL IMPORTS ---
-from telethon_manager import SESSION_DIR, TelethonAuth 
-from config import ADMIN_ID
+# 🟢 ИСПРАВЛЕНИЕ: Импортируем SESSION_DIR из config, как и положено
+from telethon_manager import TelethonAuth 
+from config import ADMIN_ID, SESSION_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,18 @@ admin_router = Router(name="admin_router")
 drop_router = Router(name="drop_router")
 
 # --- MIDDLEWARE & HELPERS ---
+
+# 🟢 НОВЫЙ MIDDLEWARE: Для внедрения зависимостей в data хендлеров
+class DependencyInjectorMiddleware(BaseMiddleware):
+    def __init__(self, data: Dict[str, Any]):
+        self.data = data
+        super().__init__()
+
+    async def __call__(self, handler, event: Update, data: Dict[str, Any]):
+        data.update(self.data) # Внедряем db, tm, store, и т.д.
+        return await handler(event, data)
+
+# 🟢 ИСПРАВЛЕННЫЙ MIDDLEWARE: Только для RateLimit, не трогает внедрение зависимостей
 class RateLimitMiddleware(BaseMiddleware):
     def __init__(self, store, limit=0.5):
         self.store = store
@@ -35,9 +48,11 @@ class RateLimitMiddleware(BaseMiddleware):
         uid = get_user_id_from_update(event) 
         if uid is None: return await handler(event, data)
         now = asyncio.get_event_loop().time()
+        
+        # Если прошло слишком мало времени, блокируем
         if uid in self.last_request and now - self.last_request[uid] < self.limit: return 
+        
         self.last_request[uid] = now
-        # 🟢 Middleware исправлена: больше нет ошибочной попытки внедрить зависимости
         return await handler(event, data)
 
 def get_user_id_from_update(update: Update) -> Optional[int]:
@@ -55,9 +70,22 @@ def check_valid_phone(phone: str) -> Optional[str]:
 # I. ОБЩИЕ КОМАНДЫ И НАВИГАЦИЯ
 # =========================================================================
 
+# 🟢 STATES
+class PromoState(StatesGroup):
+    waiting_for_code = State()
+
+class AdminState(StatesGroup):
+    creating_promo_code = State()
+
+# 🟢 INLINE KEYBOARD (Пример)
+inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🔑 Авторизация", callback_data="login_action")],
+    [InlineKeyboardButton(text="🎁 Промокод", callback_data="promo_action")],
+])
+
+
 @user_router.message(Command("start"))
 async def cmd_start(message: Message, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs, которые передал Aiogram
     db = kwargs.get('db')
     tm = kwargs.get('tm')
     store = kwargs.get('store')
@@ -86,16 +114,25 @@ async def cmd_start(message: Message, **kwargs):
     text = (
         f"🤖 Привет, **{message.from_user.full_name}**!\n"
         f"{status_text}\n"
-        f"Доступные команды: /login, /logout, /promo"
+        f"Выберите действие ниже."
     )
-    await message.answer(text, parse_mode='Markdown')
+    await message.answer(text, parse_mode='Markdown', reply_markup=inline_kb)
 
 @user_router.message(Command("logout"))
 async def cmd_logout(message: Message, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     tm = kwargs.get('tm')
     await tm.stop_worker(message.from_user.id)
+    
+# 🟢 ОБРАБОТЧИКИ ДЛЯ INLINE КНОПОК
+@user_router.callback_query(F.data == "login_action")
+async def cb_login_action(callback: CallbackQuery, **kwargs):
+    await callback.answer()
+    await cmd_login(callback.message, callback.bot.state, **kwargs)
 
+@user_router.callback_query(F.data == "promo_action")
+async def cb_promo_action(callback: CallbackQuery, **kwargs):
+    await callback.answer()
+    await cmd_promo(callback.message, callback.bot.state) # FSM state передается автоматически
 
 # =========================================================================
 # II. ЛОГИКА АВТОРИЗАЦИИ TELETHON (/login)
@@ -103,7 +140,6 @@ async def cmd_logout(message: Message, **kwargs):
 
 @user_router.message(Command("login"))
 async def cmd_login(message: Message, state: FSMContext, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     tm = kwargs.get('tm')
 
     uid = message.from_user.id
@@ -114,12 +150,11 @@ async def cmd_login(message: Message, state: FSMContext, **kwargs):
     if success:
         return await message.answer(result_msg, parse_mode='Markdown')
     else:
-        await message.set_state(TelethonAuth.phone)
+        await state.set_state(TelethonAuth.phone)
         await message.answer("📞 **Введите номер телефона** для авторизации (например, `+79xxxxxxxxxx`):")
 
 @user_router.message(StateFilter(TelethonAuth.phone))
 async def auth_get_phone(message: Message, state: FSMContext, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     tm = kwargs.get('tm')
 
     uid = message.from_user.id
@@ -139,7 +174,6 @@ async def auth_get_phone(message: Message, state: FSMContext, **kwargs):
 
 @user_router.message(StateFilter(TelethonAuth.code))
 async def auth_get_code(message: Message, state: FSMContext, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     tm = kwargs.get('tm')
     store = kwargs.get('store')
 
@@ -169,7 +203,6 @@ async def auth_get_code(message: Message, state: FSMContext, **kwargs):
 
 @user_router.message(StateFilter(TelethonAuth.password))
 async def auth_get_password(message: Message, state: FSMContext, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     tm = kwargs.get('tm')
 
     uid = message.from_user.id
@@ -181,7 +214,6 @@ async def auth_get_password(message: Message, state: FSMContext, **kwargs):
     if success:
         await state.clear()
     else:
-        # Если пароль неверный, tm.sign_in_password уже очистил сессию
         await state.clear()
         await message.answer("Начните /login заново.")
 
@@ -190,9 +222,6 @@ async def auth_get_password(message: Message, state: FSMContext, **kwargs):
 # III. ПРОМОКОДЫ
 # =========================================================================
 
-class PromoState(StatesGroup):
-    waiting_for_code = State()
-
 @user_router.message(Command("promo"))
 async def cmd_promo(message: Message, state: FSMContext):
     await state.set_state(PromoState.waiting_for_code)
@@ -200,7 +229,6 @@ async def cmd_promo(message: Message, state: FSMContext):
 
 @user_router.message(PromoState.waiting_for_code)
 async def process_promo_code(message: Message, state: FSMContext, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     db = kwargs.get('db')
 
     code = message.text.strip().upper() 
@@ -220,12 +248,8 @@ async def process_promo_code(message: Message, state: FSMContext, **kwargs):
 # IV. АДМИН-ПАНЕЛЬ
 # =========================================================================
 
-class AdminState(StatesGroup):
-    creating_promo_code = State()
-
 @admin_router.message(Command("admin"))
 async def cmd_admin(message: Message, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     tm = kwargs.get('tm')
 
     if message.from_user.id != ADMIN_ID:
@@ -250,7 +274,6 @@ async def cmd_create_promo(message: Message, state: FSMContext):
 
 @admin_router.message(AdminState.creating_promo_code)
 async def process_create_promo(message: Message, state: FSMContext, **kwargs):
-    # 🟢 ИСПРАВЛЕНИЕ: Извлекаем зависимости из kwargs
     db = kwargs.get('db')
 
     if message.from_user.id != ADMIN_ID: return
