@@ -1,53 +1,40 @@
 import os
-from dotenv import load_dotenv
-from datetime import timedelta
 import pytz
+from dotenv import load_dotenv
 
 load_dotenv()
 
 # =========================================================================
-# I. CORE НАСТРОЙКИ
+# I. КОНСТАНТЫ И НАСТРОЙКИ
 # =========================================================================
 
 # --- AIOGRAM BOT ---
-BOT_TOKEN = os.getenv("BOT_TOKEN") 
-
-try:
-    ADMIN_ID = int(os.getenv("ADMIN_ID"))
-except (TypeError, ValueError):
-    ADMIN_ID = None 
+BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+ADMIN_ID: int = int(os.getenv("ADMIN_ID", "0"))
 
 # --- TELETHON CLIENT ---
-try:
-    API_ID = int(os.getenv("API_ID"))
-except (TypeError, ValueError):
-    API_ID = None 
+API_ID: int = int(os.getenv("API_ID", "0"))
+API_HASH: str = os.getenv("API_HASH", "")
 
-API_HASH = os.getenv("API_HASH") 
+# --- НАСТРОЙКИ ---
+SUPPORT_BOT_USERNAME: str = os.getenv("SUPPORT_BOT_USERNAME", "support_bot")
+TARGET_CHANNEL_URL: str = os.getenv("TARGET_CHANNEL_URL", "@default_channel")
 
-# =========================================================================
-# II. НАСТРОЙКИ ФУНКЦИОНАЛА
-# =========================================================================
+# --- PATHS & TIME ---
+TIMEZONE: str = os.getenv("TIMEZONE", "Europe/Moscow")
+DB_NAME: str = os.getenv("DB_NAME", "bot_database.db")
+SESSIONS_DIR: str = os.getenv("SESSIONS_DIR", "sessions")
+DATA_DIR: str = os.getenv("DATA_DIR", "data")
+TEMP_DIR: str = os.path.join(DATA_DIR, 'temp')
+DB_PATH: str = os.path.join(DATA_DIR, DB_NAME)
 
-DB_NAME = "bot_database.db"
-SESSION_DIR = "sessions" 
+# --- TELETHON SETTINGS ---
+QR_TIMEOUT: int = 180 
+FLOOD_TASK_TIMEOUT: int = 5
 
-TIMEZONE_MSK = pytz.timezone("Europe/Moscow") 
+# --- TIMEZONE OBJECT ---
+MOSCOW_TZ = pytz.timezone(TIMEZONE)
 
-TARGET_CHANNEL_URL = os.getenv("TARGET_CHANNEL_URL")
-SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME")
-
-RATE_LIMIT_TIME = 0.5 
-RATE_LIMIT_COUNT = 5 
-
-TELETHON_TIMEOUT = 10 
-
-# =========================================================================
-# III. НАСТРОЙКИ DROP-СИСТЕМЫ
-# =========================================================================
-
-DROP_SESSION_TIMEOUT = timedelta(hours=2)
-try:
-    DROP_LOG_CHAT_ID = int(os.getenv("DROP_LOG_CHAT_ID", ADMIN_ID))
-except:
-    DROP_LOG_CHAT_ID = ADMIN_ID
+# Проверка, что основные константы установлены
+if not all([BOT_TOKEN, API_ID, API_HASH, ADMIN_ID]):
+    raise ValueError("Необходимо заполнить BOT_TOKEN, API_ID, API_HASH и ADMIN_ID в .env")
