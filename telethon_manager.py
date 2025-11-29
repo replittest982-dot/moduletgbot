@@ -43,7 +43,6 @@ class TelethonManager:
         return client
 
     async def register_handlers(self, client: TelegramClient, user_id: int):
-        # Здесь должна быть логика ваших обработчиков событий Telethon
         pass
 
     # --- АВТОРИЗАЦИЯ ПО НОМЕРУ ---
@@ -67,7 +66,6 @@ class TelethonManager:
     async def sign_in(self, user_id: int, code: str) -> tuple[bool, str, str | None]:
         """🔢 Ввод SMS кода"""
         data = self.store.temp_data.get(user_id)
-        # ✅ ИСПРАВЛЕНИЕ: Исправлен синтаксис 'if not'
         if not data or 'client' not in data: 
              return False, "❌ Сессия утеряна", None
         
@@ -78,10 +76,9 @@ class TelethonManager:
         try:
             await client.sign_in(phone, code, phone_code_hash)
             me = await client.get_me()
-            # ✅ ИСПРАВЛЕНИЕ: Корректное сохранение сессии в StringSession
             session_str = StringSession.save(client.session) 
             await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
-            del self.store.temp_data[user_id] # Очищаем временные данные
+            del self.store.temp_data[user_id] 
             return True, f"✅ Вход успешен! @{me.username}", session_str
         except SessionPasswordNeededError:
             return False, "⚠️ Требуется пароль 2FA", None
@@ -95,7 +92,6 @@ class TelethonManager:
     async def sign_in_password(self, user_id: int, password: str) -> tuple[bool, str]:
         """🔑 Ввод пароля 2FA"""
         data = self.store.temp_data.get(user_id)
-        # ✅ ИСПРАВЛЕНИЕ: Исправлен синтаксис 'if not'
         if not data or 'client' not in data: 
              return False, "❌ Сессия утеряна"
         
@@ -103,10 +99,9 @@ class TelethonManager:
         try:
             await client.sign_in(password=password)
             me = await client.get_me()
-            # ✅ ИСПРАВЛЕНИЕ: Корректное сохранение сессии
             session_str = StringSession.save(client.session)
             await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
-            del self.store.temp_data[user_id] # Очищаем временные данные
+            del self.store.temp_data[user_id] 
             return True, f"✅ 2FA успешен! @{me.username}"
         except (PasswordHashInvalidError, SessionPasswordNeededError):
             return False, "❌ Неверный пароль 2FA."
@@ -123,7 +118,6 @@ class TelethonManager:
         
         try:
             await client.connect()
-            # ✅ ИСПРАВЛЕНИЕ: Использование client.qr_login() и сохранение объекта ожидания
             qr_login_object = await client.qr_login() 
             self.store.temp_data[user_id]['qr_login_data'] = qr_login_object
             return qr_login_object.url, qr_login_object
@@ -135,11 +129,9 @@ class TelethonManager:
     async def check_qr_login(self, user_id: int, qr_data_object, client: TelegramClient) -> tuple[bool, str]:
         """Проверка статуса QR-авторизации"""
         try:
-            # Ожидаем завершения QR-авторизации
             await qr_data_object.wait()
             
             if await client.is_user_authorized():
-                # ✅ ИСПРАВЛЕНИЕ: Корректное сохранение сессии
                 session_str = StringSession.save(client.session)
                 await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
                 del self.store.temp_data[user_id]
@@ -151,7 +143,6 @@ class TelethonManager:
             return False, f"❌ Превышен лимит: {e.seconds}с."
         except Exception as e:
             logger.error(f"check_qr_login error for {user_id}: {e}")
-            # Не удаляем сессию, если это ошибка ожидания/таймаута, чтобы дать шанс 2FA
             return False, f"❌ Ошибка ожидания QR: {e}"
 
     # --- УПРАВЛЕНИЕ WORKER'АМИ ---
@@ -171,7 +162,7 @@ class TelethonManager:
             await self.register_handlers(client, user_id)
             client.start()
             
-            await self.db.update_user(user_id, telethon_active=2) # 2 = running
+            await self.db.update_user(user_id, telethon_active=2) 
             return True
             
         except AuthKeyUnregisteredError:
@@ -210,7 +201,6 @@ class TelethonManager:
                  await self.db.update_user(user_id, telethon_active=0, session_str=None)
 
     async def process_pc_start(self, user_id: int, message_obj, pc_name: str) -> str:
-        # message_obj: aiogram.types.Message
         chat_id = message_obj.chat.id
         self.store.drop_mapping[pc_name] = chat_id
         await self.db.update_drop_session(user_id, pc_name, phone=None) 
