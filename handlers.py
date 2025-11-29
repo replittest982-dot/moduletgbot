@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-# АБСОЛЮТНЫЕ ИМПОРТЫ
+# УБРАНЫ ТОЧКИ ПЕРЕД ИМЕНАМИ МОДУЛЕЙ
 from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, TEMP_DIR, QR_TIMEOUT, MOSCOW_TZ
 from utils import TelethonAuth, AdminState, UserState, DropUserState, GlobalStorage, check_valid_phone, format_drop_report
 from db import AsyncDatabase
