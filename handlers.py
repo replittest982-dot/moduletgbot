@@ -33,8 +33,10 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
         InlineKeyboardButton(text="Задать вопрос", url=f"https://t.me/{SUPPORT_BOT_USERNAME}")
     ])
     if not is_subscribed and not is_admin:
+        # Если нет подписки и это не админ
         kb.append([InlineKeyboardButton(text="Доступ к боту закрыт (Подписка)", callback_data="info_sub")])
     else:
+        # Если есть подписка или это админ
         if not is_telethon_active:
             kb.append([
                 InlineKeyboardButton(text="📱 Вход по QR-коду", callback_data="auth_qr"),
@@ -65,12 +67,15 @@ async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     has_progress = uid in tm.store.process_progress
     is_admin = uid == ADMIN_ID
     
+    # Проверка подписки на канал (если не админ)
     if is_initial_check and not is_subscribed_bool and not is_admin:
         try:
             member = await bot.get_chat_member(TARGET_CHANNEL_URL, uid)
             if member.status not in ['member', 'creator', 'administrator']:
                 return await bot.send_message(chat_id, f"⚠️ Подпишитесь на: **{TARGET_CHANNEL_URL}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подписаться", url=f"https://t.me/{TARGET_CHANNEL_URL.lstrip('@')}")], [InlineKeyboardButton(text="Я подписался", callback_data="check_subscription")]]), parse_mode='Markdown')
-        except Exception: pass
+        except Exception: 
+            # Если канал приватный или ошибка API, просто продолжаем
+            pass
 
     await bot.send_message(chat_id, f"🤖 Привет!\n**Подписка:** {sub_status_text}", parse_mode='Markdown', reply_markup=get_main_menu_kb(is_subscribed_bool, is_telethon_active, is_worker_running, has_progress, is_admin))
 
@@ -81,6 +86,7 @@ async def cmd_start(message: Message, bot: Bot, db: AsyncDatabase, tm: TelethonM
 @user_router.callback_query(F.data == "check_subscription")
 async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: AsyncDatabase, tm: TelethonManager, **kwargs):
     await callback.answer()
+    # Отправляем меню заново с проверкой подписки
     await send_start_menu(callback.from_user.id, bot, db, tm, is_initial_check=True)
     await callback.message.delete()
 
@@ -95,14 +101,21 @@ async def cb_auth_phone(callback: CallbackQuery, state: FSMContext, **kwargs):
 async def auth_get_phone(message: Message, state: FSMContext, tm: TelethonManager, **kwargs):
     phone = check_valid_phone(message.text)
     if not phone: return await message.answer("❌ Неверный формат.")
+    
+    # Проверяем, существует ли уже активный worker для этого пользователя
+    if message.from_user.id in tm.store.active_workers:
+        return await message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
+
     msg = await tm.send_code(message.from_user.id, phone)
     if "❌" in msg: return await message.answer(msg)
+    
     await state.set_state(TelethonAuth.CODE)
     await message.answer(f"{msg} Введите код:")
 
 @user_router.message(StateFilter(TelethonAuth.CODE))
 async def auth_get_code(message: Message, state: FSMContext, bot: Bot, db: AsyncDatabase, tm: TelethonManager, **kwargs):
     success, msg, _ = await tm.sign_in(message.from_user.id, message.text.strip())
+    
     if success:
         await state.clear()
         await message.answer(msg)
@@ -124,23 +137,50 @@ async def auth_get_pass(message: Message, state: FSMContext, bot: Bot, db: Async
 @user_router.callback_query(F.data == "auth_qr")
 async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
     await callback.answer("Генерация...")
+    
+    if callback.from_user.id in tm.store.active_workers:
+        return await callback.message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
+        
     try:
         url, img = await tm.start_qr_login(callback.from_user.id)
-    except Exception as e: return await callback.message.answer(f"Ошибка: {e}")
+    except Exception as e: 
+        logger.error(f"QR Login start error: {e}")
+        return await callback.message.answer(f"❌ Ошибка: {e}")
     
     bio = BytesIO()
+    # Используем PIL Image, если доступен
     if img: img.save(bio, 'PNG')
-    else: qrcode.make(url).save(bio, 'PNG')
+    # Иначе генерируем QR-код сами
+    else: qrcode.make(url).save(bio, 'PNG') 
     bio.seek(0)
     
     await callback.message.answer_photo(bio, caption=f"Отсканируйте код. Действует {QR_TIMEOUT}с.")
     await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
     
     data = tm.store.temp_data.get(callback.from_user.id)
-    success, msg = await asyncio.wait_for(tm.check_qr_login(callback.from_user.id, data['qr_login_data'], data['client']), timeout=QR_TIMEOUT+10)
-    
+    if not data:
+        await state.clear()
+        return await callback.message.answer("❌ Сессия QR-авторизации утеряна. Попробуйте снова.")
+
+    # Ожидаем завершения QR-авторизации с таймаутом
+    try:
+        success, msg = await asyncio.wait_for(
+            tm.check_qr_login(callback.from_user.id, data['qr_login_data'], data['client']), 
+            timeout=QR_TIMEOUT + 5 # 5 секунд запас
+        )
+    except asyncio.TimeoutError:
+        await state.clear()
+        await tm.stop_worker(callback.from_user.id, delete_session=True)
+        return await callback.message.answer("❌ Время ожидания QR-кода истекло.")
+    except Exception as e:
+        await state.clear()
+        await tm.stop_worker(callback.from_user.id, delete_session=True)
+        return await callback.message.answer(f"❌ Произошла ошибка при проверке QR: {e}")
+
+
     if success:
         await state.clear()
+        await callback.message.answer(msg)
         await send_start_menu(callback.from_user.id, bot, db, tm)
     elif "⚠️" in msg:
         await state.set_state(TelethonAuth.QR_PASSWORD)
@@ -149,11 +189,25 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         await state.clear()
         await callback.message.answer(msg)
 
+@user_router.message(StateFilter(TelethonAuth.QR_PASSWORD))
+async def auth_get_qr_pass(message: Message, state: FSMContext, bot: Bot, db: AsyncDatabase, tm: TelethonManager, **kwargs):
+    # Используем ту же функцию sign_in_password, т.к. логика одинакова
+    success, msg = await tm.sign_in_password(message.from_user.id, message.text.strip())
+    await message.answer(msg)
+    if success:
+        await state.clear()
+        await send_start_menu(message.from_user.id, bot, db, tm)
+
+
 # --- Worker ---
 @user_router.callback_query(F.data == "worker_start")
 async def cb_work_start(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
-    if await tm.start_client_task(callback.from_user.id): await callback.answer("Запущен.")
-    else: await callback.answer("Ошибка.", show_alert=True)
+    if await tm.start_client_task(callback.from_user.id): 
+        await callback.answer("Запущен.")
+    else: 
+        await callback.answer("Ошибка запуска. Попробуйте войти заново.", show_alert=True)
+        # Если не смогли запустить, сбрасываем состояние телетона в БД
+        await db.update_user(callback.from_user.id, telethon_active=0)
     await send_start_menu(callback.from_user.id, bot, db, tm)
 
 @user_router.callback_query(F.data == "worker_stop")
@@ -162,11 +216,67 @@ async def cb_work_stop(callback: CallbackQuery, tm: TelethonManager, bot: Bot, d
     await callback.answer("Остановлен.")
     await send_start_menu(callback.from_user.id, bot, db, tm)
 
+@user_router.callback_query(F.data == "worker_status")
+async def cb_work_status(callback: CallbackQuery, tm: TelethonManager, **kwargs):
+    progress = tm.store.process_progress.get(callback.from_user.id)
+    if progress:
+        if progress['type'] == 'flood': 
+            status_text = f"Флуд: {progress['sent']}/{progress['total']}"
+        elif progress['type'] == 'checkgroup': 
+            status_text = f"Скан `{progress['peer_name']}`: {progress['processed']} сообщ, {progress['total_users']} юзеров"
+        else:
+            status_text = "Неизвестный процесс."
+    else:
+        status_text = "Нет активных задач."
+        
+    await callback.answer(f"Статус: {status_text}", show_alert=True)
+
+
 @user_router.callback_query(F.data == "auth_logout")
-async def cb_logout(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
+async def cb_logout(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: AsyncDatabase, state: FSMContext, **kwargs):
+    await state.clear()
     await tm.stop_worker(callback.from_user.id, delete_session=True)
     await callback.answer("Сессия удалена.")
     await send_start_menu(callback.from_user.id, bot, db, tm)
+
+
+# --- Info ---
+@user_router.callback_query(F.data.startswith("info_"))
+async def cb_info(callback: CallbackQuery, db: AsyncDatabase, tm: TelethonManager, **kwargs):
+    key = callback.data.split('_')[1]
+    text = "Информация:\n"
+    
+    if key == 'sub':
+        _, status_text = await db.get_subscription_status(callback.from_user.id, ADMIN_ID)
+        text = f"**Статус подписки:** {status_text}\n"
+        text += "Для получения доступа приобретите подписку."
+    elif key == 'worker':
+        if callback.from_user.id in tm.store.active_workers:
+            text = "Worker активен. Он слушает ваши исходящие сообщения в Телеграме, начиная с символа `.` (например, `.флуд`)."
+        else:
+            text = "Worker остановлен. Чтобы начать использовать команды, нажмите 'Запустить Worker'."
+    elif key == 'help':
+        text = textwrap.dedent("""
+        **Доступные команды в Телеграме:**
+        
+        * `.флуд <кол-во> <текст> <задержка> [цель]`
+            - `кол-во`: количество сообщений (0 для бесконечности).
+            - `задержка`: в секундах (например, 0.1).
+            - `цель`: `@username`, `ID` или `название чата` (опционально, по умолчанию текущий чат).
+        * `.стопфлуд` - останавливает все активные флуды.
+        * `.лс` - отправляет сообщение нескольким пользователям. Формат:
+            `.лс Привет!`
+            `@user1`
+            `@user2`
+        * `.чекгруппу [цель]` - сканирует группу на пользователей (долгий процесс).
+        * `.статус` - показывает текущий прогресс задач.
+        
+        **Команды для дропов:**
+        * `.пкстарт <НазваниеПК>` - привязывает ПК к текущему чату/топику.
+        """)
+        
+    await callback.answer(text, show_alert=True)
+
 
 # --- Promo ---
 @user_router.callback_query(F.data == "user_promo")
@@ -181,6 +291,9 @@ async def promo_proc(message: Message, state: FSMContext, db: AsyncDatabase, bot
     if success:
         await state.clear()
         await send_start_menu(message.from_user.id, bot, db, tm)
+    else:
+        # Если неудача, остаемся в состоянии для повторного ввода
+        await message.answer("Попробуйте другой промокод или нажмите /start для выхода в меню.")
 
 # --- Admin ---
 @admin_router.callback_query(F.data == "admin_panel")
@@ -198,34 +311,67 @@ async def cmd_mk_promo(message: Message, state: FSMContext, **kwargs):
 @admin_router.message(StateFilter(AdminState.CREATING_PROMO_CODE))
 async def proc_mk_promo(message: Message, state: FSMContext, db: AsyncDatabase, **kwargs):
     parts = message.text.split()
-    if len(parts) != 3: return await message.answer("Неверный формат.")
-    if await db.create_promo_code(parts[0], int(parts[1]), int(parts[2])):
-        await message.answer("✅ Создан.")
+    if len(parts) != 3: 
+        return await message.answer("Неверный формат. Ожидался `КОД ДНИ МАКС_ЮЗЕРОВ`.")
+    try:
+        code = parts[0].strip().upper()
+        days = int(parts[1])
+        max_uses = int(parts[2])
+    except ValueError:
+        return await message.answer("Дни и Макс_юзеров должны быть числами.")
+
+    if await db.create_promo_code(code, days, max_uses):
+        await message.answer(f"✅ Промокод **{code}** создан: {days} дней, {max_uses} использований.", parse_mode='Markdown')
         await state.clear()
-    else: await message.answer("Ошибка (код существует?).")
+    else: 
+        await message.answer(f"❌ Ошибка (код **{code}** уже существует?).", parse_mode='Markdown')
+        await state.clear()
 
 # --- Drop System ---
 @drop_router.message(Command("numb"))
 async def d_numb(message: Message, db: AsyncDatabase, store: GlobalStorage, **kwargs):
+    # Определяем имя ПК через привязку к чату/топику
     pc = store.drop_mapping.get((message.chat.id, message.message_thread_id or 0))
-    if not pc: return await message.answer("ПК не привязан (.пкстарт).")
-    ph = await db.create_drop_session(pc, message.from_user.id)
-    await message.answer(f"✅ **{pc}**: Жду номер. `{ph}`", parse_mode='Markdown')
+    if not pc: return await message.answer("❌ ПК не привязан к этому чату/топику. Используйте `.пкстарт <НазваниеПК>` из Telethon-аккаунта.")
+    
+    # Создаем новую сессию
+    drop_id = message.from_user.id
+    phone_placeholder = await db.create_drop_session(pc, drop_id)
+    
+    await message.answer(f"✅ **{pc}**: Жду номер. Введите команду `/num <номер>` (например: `/num +79001234567`). \n\n**ID сессии:** `{phone_placeholder}`", parse_mode='Markdown')
 
 @drop_router.message(Command("num"))
 async def d_num(message: Message, db: AsyncDatabase, **kwargs):
     args = message.text.split()
-    if len(args) < 2: return
+    if len(args) < 2: return await message.answer("❌ Неверный формат. Используйте `/num <номер>`.")
+    
+    new_phone = check_valid_phone(args[1])
+    if not new_phone: return await message.answer("❌ Неверный формат номера телефона.")
+    
     sess = await db.get_latest_drop_session(message.from_user.id)
-    if sess:
-        await db.update_drop_session(sess['phone'], new_phone=args[1], status="дайте номер")
-        await message.answer(f"✅ Номер {args[1]} для {sess['pc_name']}")
+    if not sess: return await message.answer("❌ Нет активной сессии для обновления. Начните с `/numb`.")
+    
+    success, msg = await db.update_drop_session(sess['phone'], new_phone=new_phone, status="дайте номер")
+    
+    if success:
+        await message.answer(f"✅ Номер **{new_phone}** привязан к **{sess['pc_name']}**. Статус: `дайте номер`", parse_mode='Markdown')
+    else:
+        await message.answer(f"❌ Ошибка: {msg}")
 
-async def d_status(msg, st, db):
+async def d_status(msg: Message, st: str, db: AsyncDatabase):
     sess = await db.get_latest_drop_session(msg.from_user.id)
-    if sess:
-        await db.update_drop_session(sess['phone'], status=st)
-        await msg.answer(f"✅ {sess['pc_name']}: {st}")
+    if not sess: return await msg.answer("❌ Нет активной сессии для обновления. Начните с `/numb`.")
+    
+    success, _ = await db.update_drop_session(sess['phone'], status=st)
+    if success:
+        # Получаем обновленные данные, чтобы показать актуальное "Время в работе"
+        updated_sess = await db.get_latest_drop_session(msg.from_user.id)
+        # Использование format_drop_report для создания отчета
+        report_msg = format_drop_report(dict(updated_sess))
+        
+        await msg.answer(f"✅ **{sess['pc_name']}**: Статус `{st.upper()}` обновлен.", parse_mode='Markdown')
+    else:
+        await msg.answer("❌ Ошибка обновления статуса.")
 
 @drop_router.message(Command("vstal"))
 async def d_vstal(m: Message, db: AsyncDatabase, **kwargs): await d_status(m, "в работе", db)
@@ -235,8 +381,14 @@ async def d_error(m: Message, db: AsyncDatabase, **kwargs): await d_status(m, "e
 async def d_slet(m: Message, db: AsyncDatabase, **kwargs): await d_status(m, "slet", db)
 @drop_router.message(Command("povt"))
 async def d_povt(m: Message, db: AsyncDatabase, **kwargs): await d_status(m, "повтор", db)
+@drop_router.message(Command("zamena"))
+async def d_zamena(m: Message, db: AsyncDatabase, **kwargs): await d_status(m, "замена", db) 
 
 @drop_router.message(Command("report_last"))
 async def d_rep(message: Message, db: AsyncDatabase, **kwargs):
     sess = await db.get_latest_drop_session(message.from_user.id)
-    if sess: await message.answer(format_drop_report(sess), parse_mode='Markdown')
+    if sess: 
+        # Использование format_drop_report для создания отчета
+        await message.answer(format_drop_report(dict(sess)), parse_mode='Markdown')
+    else:
+        await message.answer("❌ Нет активной сессии для отчета. Начните с `/numb`.")
