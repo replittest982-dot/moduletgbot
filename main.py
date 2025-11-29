@@ -2,23 +2,22 @@ import asyncio
 import logging
 import os
 import sys
-from contextlib import suppress
+from typing import Dict, Any # 🟢 ИСПРАВЛЕНИЕ: Используем Dict из typing
 
 # --- AIOGRAM ---
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage 
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Dict # 🟢 НОВЫЙ ИМПОРТ
 
 # --- LOCAL IMPORTS ---
 from telethon_manager import TelethonManager, GlobalStorage
 from db import AsyncDatabase
-from handlers import user_router, admin_router, drop_router, RateLimitMiddleware 
+from handlers import user_router, admin_router, drop_router, RateLimitMiddleware, DependencyInjectorMiddleware
 from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, DB_NAME, RATE_LIMIT_TIME
 from set_commands import set_default_commands
 
 # =========================================================================
-# I. НАСТРОЙКА ЛОГИРОВАНИЯ И ИНИЦИАЛИЗАЦИЯ
+# I. НАСТРОЙКА ЛОГИРОВАНИЯ И ИНИЦИАЛИЗАЦИИ
 # =========================================================================
 
 logging.basicConfig(
@@ -39,13 +38,8 @@ dp = Dispatcher(storage=storage)
 # Передаем bot, store, db в менеджер Telethon
 tm = TelethonManager(bot, store, db) 
 
-# ❌ УДАЛЕНЫ НЕПРАВИЛЬНЫЕ СТРОКИ ИНЪЕКЦИИ
-# user_router.db = db; user_router.tm = tm; user_router.store = store
-# admin_router.db = db; admin_router.tm = tm; admin_router.store = store
-# drop_router.db = db; drop_router.tm = tm; drop_router.store = store 
-
 # 🟢 СОЗДАЕМ СЛОВАРЬ ЗАВИСИМОСТЕЙ
-DI_DATA: Dict = {
+DI_DATA: Dict[str, Any] = {
     "db": db, 
     "tm": tm, 
     "store": store
@@ -55,7 +49,8 @@ DI_DATA: Dict = {
 # II. STARTUP И ЗАПУСК
 # =========================================================================
 
-async def on_startup(dispatcher: Dispatcher, bot: Bot):
+async def on_startup(_): # 🟢 ИСПРАВЛЕНИЕ: on_startup принимает только один аргумент (Dispatcher), но мы игнорируем его
+    global bot # 🟢 ИСПРАВЛЕНИЕ: Доступ к глобальному объекту bot
     logger.info("Bot starting up...")
     
     await set_default_commands(bot, ADMIN_ID)
@@ -82,12 +77,16 @@ async def main():
         logger.critical("❌ One or more essential variables are missing. Check your config.py/ .env file.")
         sys.exit(1)
 
-    # Регистрация Middleware
-    middleware = RateLimitMiddleware(store, limit=RATE_LIMIT_TIME)
-    dp.message.outer_middleware(middleware)
-    dp.callback_query.outer_middleware(middleware)
+    # 🟢 РЕГИСТРАЦИЯ MIDDLEWARE ДЛЯ ВНЕДРЕНИЯ ЗАВИСИМОСТЕЙ (ДО ВСЕХ РОУТЕРОВ)
+    dp.message.outer_middleware(DependencyInjectorMiddleware(DI_DATA))
+    dp.callback_query.outer_middleware(DependencyInjectorMiddleware(DI_DATA))
     
-    # 🟢 РЕГИСТРАЦИЯ РОУТЕРОВ С ПЕРЕДАЧЕЙ ЗАВИСИМОСТЕЙ ЧЕРЕЗ **data
+    # Регистрация Middleware для RateLimit (после DI Middleware, чтобы иметь доступ к store)
+    rate_middleware = RateLimitMiddleware(store, limit=RATE_LIMIT_TIME)
+    dp.message.outer_middleware(rate_middleware)
+    dp.callback_query.outer_middleware(rate_middleware)
+    
+    # Регистрация роутеров
     dp.include_router(user_router)
     dp.include_router(admin_router)
     dp.include_router(drop_router) 
@@ -103,8 +102,8 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Starting polling...")
-    # 🟢 ПЕРЕДАЕМ DI_DATA В dp.start_polling
-    await dp.start_polling(bot, **DI_DATA)
+    # 🟢 ИСПРАВЛЕНИЕ: Запускаем без **DI_DATA
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
     if sys.platform == 'win32': 
