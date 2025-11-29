@@ -1,52 +1,62 @@
-import pytz
+import os
+from dotenv import load_dotenv
 from datetime import timedelta
+import pytz
 
-# ВНИМАНИЕ: Все ключевые значения теперь заданы напрямую в этом файле.
+# Загрузка переменных окружения из .env файла
+load_dotenv()
 
 # =========================================================================
-# I. CORE НАСТРОЙКИ (ЖЕСТКО ЗАДАННЫЕ ЗНАЧЕНИЯ)
+# I. CORE НАСТРОЙКИ
 # =========================================================================
 
 # --- AIOGRAM BOT ---
-# Ваш актуальный токен
-BOT_TOKEN = "7868097991:AAEieED31N93hsrJIQnC6omaXuAZ3uA3hdk"
+# Исправлено: Загрузка по имени "BOT_TOKEN"
+BOT_TOKEN = os.getenv("BOT_TOKEN") 
 
-# Ваш личный ID администратора
-ADMIN_ID = 6256576302 
+# Исправлено: Загрузка по имени "ADMIN_ID"
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID"))
+except (TypeError, ValueError):
+    ADMIN_ID = None 
 
 # --- TELETHON CLIENT ---
-# Ваши ключи с my.telegram.org
-API_ID = 37185453
-API_HASH = "7e40ac0357454dddbfbbfce511c9ddf1" 
+# Исправлено: Загрузка по имени "API_ID"
+try:
+    API_ID = int(os.getenv("API_ID"))
+except (TypeError, ValueError):
+    API_ID = None 
+
+# Исправлено: Загрузка по имени "API_HASH"
+API_HASH = os.getenv("API_HASH") 
 
 # =========================================================================
 # II. НАСТРОЙКИ ФУНКЦИОНАЛА
 # =========================================================================
 
-# Настройки базы данных
-DB_NAME = "database.db"
-SESSION_DIR = "sessions" # Папка для хранения файлов сессий Telethon
+# Добавлено: Имя базы данных
+DB_NAME = "bot_database.db"
+SESSION_DIR = "sessions" 
 
-# Часовой пояс для работы с датами и расчетами в БД
+# Часовой пояс
 TIMEZONE_MSK = pytz.timezone("Europe/Moscow") 
 
 # Настройки чекера подписки
-TARGET_CHANNEL_URL = "https://t.me/STAT_PRO1"
-SUPPORT_BOT_USERNAME = "suppor_tstatpro1bot"
+TARGET_CHANNEL_URL = os.getenv("TARGET_CHANNEL_URL")
+SUPPORT_BOT_USERNAME = os.getenv("SUPPORT_BOT_USERNAME")
 
-# Ограничение частоты запросов
-RATE_LIMIT_TIME = 5 # Секунд
-RATE_LIMIT_COUNT = 5 # Количество действий
+# Добавлено/Исправлено: Более жесткий лимит для RateLimitMiddleware
+RATE_LIMIT_TIME = 0.5 
+RATE_LIMIT_COUNT = 5 
 
-# Время ожидания ответа от Telethon
 TELETHON_TIMEOUT = 10 
 
 # =========================================================================
 # III. НАСТРОЙКИ DROP-СИСТЕМЫ
 # =========================================================================
 
-# Время, по истечении которого сессия дропа считается "забытой"
 DROP_SESSION_TIMEOUT = timedelta(hours=2)
-
-# ID чата для логов Drop-системы (используем ADMIN_ID)
-DROP_LOG_CHAT_ID = ADMIN_ID
+try:
+    DROP_LOG_CHAT_ID = int(os.getenv("DROP_LOG_CHAT_ID", ADMIN_ID))
+except:
+    DROP_LOG_CHAT_ID = ADMIN_ID
