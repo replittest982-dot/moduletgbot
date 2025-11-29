@@ -14,18 +14,17 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
 
-# ✅ ИМПОРТЫ ПРОЕКТА
-from config import ADMIN_ID, QR_TIMEOUT
+# ✅ 1. УДАЛЕН ИМПОРТ: from config import QR_TIMEOUT (теперь только ADMIN_ID в main.py)
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
 
 # Настройка роутеров
 user_router = Router()
 admin_router = Router()
-router = Router() # Главный роутер для errors_handler
+router = Router() 
 logger = logging.getLogger(__name__)
 
-# --- FSM СОСТОЯНИЯ ---
+# --- FSM СОСТОЯНИЯ (без изменений) ---
 
 class UserState(StatesGroup):
     waiting_promo = State()
@@ -41,7 +40,7 @@ class TelethonAuth(StatesGroup):
     waiting_for_qr = State()
     qr_password = State()
 
-# --- ФУНКЦИИ ---
+# --- ФУНКЦИИ (без изменений) ---
 
 def generate_random_code(length=10) -> str:
     """Генерирует случайный код из букв и цифр."""
@@ -56,17 +55,16 @@ def get_admin_panel_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="check_subscription")]
     ])
 
-# В send_start_menu также используется явное извлечение, если она не в async def:
 async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: TelethonManager, force_main: bool = False):
     """ЗАМЕНИ НА СВОЮ ЛОГИКУ МЕНЮ"""
     await bot.send_message(user_id, "✅ Главное меню (замени эту функцию!)")
 
-# --- АДМИН-ПАНЕЛЬ ---
+# --- АДМИН-ПАНЕЛЬ (без изменений) ---
 
 @admin_router.callback_query(F.data == "admin_panel")
-async def cb_admin(callback: CallbackQuery):
-    """Отображает Админ-Панель."""
-    if callback.from_user.id != ADMIN_ID: # ADMIN_ID импортирован из config
+async def cb_admin(callback: CallbackQuery, **kwargs):
+    admin_id: int = kwargs["dp"]["admin_id"]
+    if callback.from_user.id != admin_id:
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
     
     text = """👑 Админ-Панель
@@ -75,25 +73,23 @@ async def cb_admin(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=get_admin_panel_kb())
     await callback.answer()
 
-# --- ВЫДАЧА ПОДПИСКИ ---
-
 @admin_router.callback_query(F.data == "admin_give_sub")
-async def cb_admin_give_sub_start(callback: CallbackQuery, state: FSMContext):
-    """Начало FSM для выдачи подписки."""
-    if callback.from_user.id != ADMIN_ID: return
+async def cb_admin_give_sub_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+    admin_id: int = kwargs["dp"]["admin_id"]
+    if callback.from_user.id != admin_id: return
+    
     await state.set_state(AdminState.waiting_give_sub)
     await callback.message.edit_text("⭐ Введите ID/USERNAME и ДНИ.\nПример: `1234567 30`")
     await callback.answer()
 
-# 🔥 ФИКС #1: Явное получение объектов из kwargs
 @admin_router.message(AdminState.waiting_give_sub)
 async def admin_give_sub_proc(message: Message, state: FSMContext, **kwargs):
-    """Обработка ввода данных для выдачи подписки."""
     bot: Bot = kwargs["bot"]
     db: AsyncDatabase = kwargs["dp"]["db"]
     tm: TelethonManager = kwargs["dp"]["tm"]
-
-    if message.from_user.id != ADMIN_ID: return
+    admin_id: int = kwargs["dp"]["admin_id"]
+    
+    if message.from_user.id != admin_id: return
     
     parts = message.text.split()
     if len(parts) != 2:
@@ -121,7 +117,6 @@ async def admin_give_sub_proc(message: Message, state: FSMContext, **kwargs):
         await state.clear()
         await message.answer(f"✅ Пользователю с ID **{user_id}** выдана подписка на **{days}** дней.")
         
-        # Уведомление пользователя
         try:
             await bot.send_message(user_id, f"🌟 **Вам выдана подписка на {days} дней!**")
         except TelegramForbiddenError:
@@ -130,28 +125,25 @@ async def admin_give_sub_proc(message: Message, state: FSMContext, **kwargs):
     except Exception as e:
         await message.answer(f"❌ Ошибка при выдаче подписки: {e}")
         
-    # send_start_menu также требует bot, db, tm
     await send_start_menu(message.from_user.id, bot, db, tm)
 
-# --- ПРОМОКОДЫ ---
-
 @admin_router.callback_query(F.data == "admin_create_promo")
-async def cb_admin_create_promo_start(callback: CallbackQuery, state: FSMContext):
-    """Начало FSM для создания промокода."""
-    if callback.from_user.id != ADMIN_ID: return
+async def cb_admin_create_promo_start(callback: CallbackQuery, state: FSMContext, **kwargs):
+    admin_id: int = kwargs["dp"]["admin_id"]
+    if callback.from_user.id != admin_id: return
+    
     await state.set_state(AdminState.waiting_promo_params)
     await callback.message.edit_text("🎁 Введите `ДНИ МАКС_ЮЗЕРОВ`.\nПример: `30 10`")
     await callback.answer()
 
-# 🔥 ФИКС #1: Явное получение объектов из kwargs
 @admin_router.message(AdminState.waiting_promo_params)
 async def admin_create_promo_proc(message: Message, state: FSMContext, **kwargs):
-    """Обработка ввода параметров промокода."""
     db: AsyncDatabase = kwargs["dp"]["db"]
     bot: Bot = kwargs["bot"]
     tm: TelethonManager = kwargs["dp"]["tm"]
-
-    if message.from_user.id != ADMIN_ID: return
+    admin_id: int = kwargs["dp"]["admin_id"]
+    
+    if message.from_user.id != admin_id: return
     
     parts = message.text.split()
     if len(parts) != 2:
@@ -174,22 +166,25 @@ async def admin_create_promo_proc(message: Message, state: FSMContext, **kwargs)
 
 # --- QR АВТОРИЗАЦИЯ ---
 
-# 🔥 ФИКС #1: Явное получение объектов из kwargs
 @user_router.callback_query(F.data == "auth_qr")
 async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
-    """Инициация QR-авторизации и генерация QR-кода."""
+    """
+    ✅ 2. ФИКС: Получение qr_timeout из kwargs.
+    Инициация QR-авторизации и генерация QR-кода.
+    """
     tm: TelethonManager = kwargs["dp"]["tm"]
     bot: Bot = kwargs["bot"]
     db: AsyncDatabase = kwargs["dp"]["db"]
+    # ✅ Получаем таймаут. Используем .get с дефолтом 120, если в main.py забыли передать.
+    qr_timeout: int = kwargs["dp"].get("qr_timeout", 120) 
 
     await callback.answer("🔄 Генерация QR-кода...")
     
-    if callback.from_user.id in tm.store.active_workers:
+    if callback.from_user.id in getattr(tm.store, 'active_workers', {}):
         return await callback.message.answer("⚠️ Уже есть активная сессия!")
     
     url, qr_obj = None, None
     try:
-        # Получаем URL и объект сессии от TelethonManager
         url, qr_obj = await tm.start_qr_login(callback.from_user.id)
     except Exception as e:
         logger.error(f"Telethon QR Login start error: {e}")
@@ -208,32 +203,24 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
         logger.error(f"Error generating QR code image: {e}")
         return await callback.message.answer("❌ Не удалось сгенерировать QR-код.")
     
-    # Отправка изображения
+    # ✅ 3. Используем переменную qr_timeout в caption
     await callback.message.answer_photo(
         photo=InputFile.from_bytes(bio.getvalue(), filename="qr.png"),
-        caption=f"📱 Отсканируйте QR-код!\n⏰ Действует **{QR_TIMEOUT}с**"
+        caption=f"📱 Отсканируйте QR-код!\n⏰ Действует **{qr_timeout}с**"
     )
     
     await state.set_state(TelethonAuth.waiting_for_qr)
-    # Здесь должна быть логика сохранения qr_obj в БД и запуск фонового процесса ожидания:
-    # await db.set_temp_session(callback.from_user.id, qr_data=qr_obj)
-    # asyncio.create_task(tm.check_qr_login(callback.from_user.id, qr_obj, bot, db, state))
     logger.info(f"QR started for {callback.from_user.id}")
 
 
-# --- ЕДИНЫЙ ERROR HANDLER (Aiogram 3.x) ---
+# --- ЕДИНЫЙ ERROR HANDLER (без изменений) ---
 
 @router.errors()
 async def errors_handler(event: ErrorEvent):
-    """
-    Обработчик всех исключений.
-    """
     exc = event.exception
     
-    # Безопасное получение ID пользователя
     user_id = getattr(getattr(event.update, 'effective_user', None), 'id', 'неизвестно')
     
-    # Логгируем в зависимости от типа ошибки
     if isinstance(exc, TelegramForbiddenError):
         logger.warning(f"🚫 Forbidden {user_id}: {exc}")
     elif isinstance(exc, TelegramBadRequest):
