@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+import traceback
 from contextlib import suppress
 
 # --- AIOGRAM ---
@@ -28,21 +29,23 @@ logger = logging.getLogger(__name__)
 # Инициализация глобального хранилища и БД
 store = GlobalStorage()
 db = AsyncDatabase(os.path.join('data', DB_NAME))
-tm = TelethonManager(None, store, db) # Инициализируем tm с заглушкой для bot
 
 # Инициализация бота и диспетчера
 storage = MemoryStorage() 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='Markdown'))
 dp = Dispatcher(storage=storage)
 
-# Передаем объекты в модули
-tm.bot = bot
+# Инициализация TelethonManager с заглушкой для bot, который будет установлен ниже
+tm = TelethonManager(bot, store, db) 
+
+# Передаем объекты в роутеры и другие модули (для обеспечения круговой зависимости)
 user_router.db = db
 user_router.tm = tm
 user_router.store = store
-admin_router.db = db
-admin_router.store = store
 
+admin_router.db = db
+admin_router.tm = tm # Также нужен для запуска воркера
+admin_router.store = store
 
 # =========================================================================
 # II. ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
@@ -64,7 +67,7 @@ async def global_error_handler(event: ErrorEvent):
             f"🔥 **BOT CRASH** 🔥\n"
             f"❌ Тип: `{exception.__class__.__name__}`\n"
             f"📄 Ошибка: `{str(exception)[:100]}`\n" 
-            f"📍 Трейсбек:\n`{traceback.format_exc()[:1500]}`"
+            f"📍 Трейсбек:\n```\n{traceback.format_exc()[:1500]}\n```" # Используем тройной бэктик для форматирования
         )
         try:
             await bot.send_message(ADMIN_ID, error_msg, parse_mode='Markdown')
@@ -78,33 +81,45 @@ async def global_error_handler(event: ErrorEvent):
 
 async def on_startup(dispatcher: Dispatcher):
     logger.info("Bot starting...")
-    # Создание папок и инициализация БД
+    
+    # 1. Создание папок
     if not os.path.exists(SESSION_DIR): os.makedirs(SESSION_DIR)
     if not os.path.exists('data'): os.makedirs('data')
+    
+    # 2. Инициализация БД
     await db.init() 
     
-    # Запуск активных воркеров
+    # 3. Запуск активных воркеров
     active_users = await db.get_active_telethon_users()
     for uid in active_users:
-        if await db.check_subscription(uid): asyncio.create_task(tm.start_client_task(uid))
+        # Проверяем подписку перед запуском
+        if await db.check_subscription(uid): 
+            asyncio.create_task(tm.start_client_task(uid))
+        else:
+            # Если подписка истекла, но статус "активный", исправляем в БД
+            await db.set_telethon_status(uid, False) 
 
 async def main():
-    dp.message.middleware(RateLimitMiddleware(store))
-    dp.callback_query.middleware(RateLimitMiddleware(store))
+    # Регистрация Middleware
+    rate_limit_middleware = RateLimitMiddleware(store)
+    dp.message.middleware(rate_limit_middleware)
+    dp.callback_query.middleware(rate_limit_middleware)
     
+    # Регистрация роутеров
     dp.include_router(user_router)
     dp.include_router(admin_router)
     
+    # Регистрация startup hook
     dp.startup.register(on_startup)
     
     # ПРОВЕРКА ТОКЕНА
     try:
-        await bot.get_me()
-        logger.info(f"Bot connected successfully. Admin ID: {ADMIN_ID}")
+        bot_info = await bot.get_me()
+        logger.info(f"Bot connected successfully. @{bot_info.username}. Admin ID: {ADMIN_ID}")
     except Exception as e:
-        logger.error(f"❌ Failed to connect to Telegram: {e}")
-        # Если токен невалиден, бот упадет ниже на delete_webhook. 
-        # Дополнительная проверка не обязательна, но информативна.
+        logger.error(f"❌ Failed to connect to Telegram. Check BOT_TOKEN: {e}")
+        # Если бот не может подключиться, нет смысла продолжать
+        sys.exit(1)
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Polling started...")
@@ -115,6 +130,6 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
+        logger.info("Bot stopped by user (KeyboardInterrupt).")
     except Exception as e:
         logger.critical(f"Critical error in main loop: {e}", exc_info=True)
