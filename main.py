@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Dict, Any # 🟢 ИСПРАВЛЕНИЕ: Используем Dict из typing
+from typing import Dict, Any 
 
 # --- AIOGRAM ---
 from aiogram import Bot, Dispatcher
@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
 # --- LOCAL IMPORTS ---
+# Убедитесь, что эти файлы существуют и импортируются корректно
 from telethon_manager import TelethonManager, GlobalStorage
 from db import AsyncDatabase
 from handlers import user_router, admin_router, drop_router, RateLimitMiddleware, DependencyInjectorMiddleware
@@ -38,7 +39,7 @@ dp = Dispatcher(storage=storage)
 # Передаем bot, store, db в менеджер Telethon
 tm = TelethonManager(bot, store, db) 
 
-# 🟢 СОЗДАЕМ СЛОВАРЬ ЗАВИСИМОСТЕЙ
+# 🟢 СОЗДАЕМ СЛОВАРЬ ЗАВИСИМОСТЕЙ ДЛЯ ВНЕДРЕНИЯ
 DI_DATA: Dict[str, Any] = {
     "db": db, 
     "tm": tm, 
@@ -46,42 +47,69 @@ DI_DATA: Dict[str, Any] = {
 }
 
 # =========================================================================
-# II. STARTUP И ЗАПУСК
+# II. STARTUP, SHUTDOWN И ЗАПУСК
 # =========================================================================
 
-async def on_startup(_): # 🟢 ИСПРАВЛЕНИЕ: on_startup принимает только один аргумент (Dispatcher), но мы игнорируем его
-    global bot # 🟢 ИСПРАВЛЕНИЕ: Доступ к глобальному объекту bot
+async def on_startup(*args, **kwargs): # 🟢 ИСПРАВЛЕНИЕ: Принимаем *args, **kwargs для надежности
+    global bot 
     logger.info("Bot starting up...")
     
+    # Извлекаем зависимости
+    db = kwargs.get('db')
+    tm = kwargs.get('tm')
+
+    # Регистрация команд
     await set_default_commands(bot, ADMIN_ID)
     
+    # Инициализация файловой системы и БД
     os.makedirs('data', exist_ok=True)
     os.makedirs('sessions', exist_ok=True)
-    await db.init() 
     
-    # Запуск активных воркеров
-    active_users = await db.get_active_telethon_users() 
-    for uid in active_users:
-        if await db.check_subscription(uid): 
-            asyncio.create_task(tm.start_client_task(uid)) 
+    if db:
+        await db.init() 
+        
+        # Запуск активных воркеров Telethon
+        active_users = await db.get_active_telethon_users() 
+        for uid in active_users:
+            if await db.check_subscription(uid): 
+                # Создаем задачу, не блокируя запуск бота
+                asyncio.create_task(tm.start_client_task(uid)) 
+            else:
+                await db.set_telethon_status(uid, False) 
+        
+        if active_users:
+            logger.info(f"Successfully initiated startup for {len(active_users)} active workers.")
         else:
-            await db.set_telethon_status(uid, False) 
+            logger.info("No active Telethon workers found on startup.")
+
+
+async def on_shutdown(*args, **kwargs): # 🟢 НОВАЯ ФУНКЦИЯ для корректного закрытия сессий
+    global bot
     
-    if active_users:
-        logger.info(f"Successfully initiated startup for {len(active_users)} active workers.")
-    else:
-        logger.info("No active Telethon workers found on startup.")
+    # 1. Закрытие сессии Aiogram Bot
+    await bot.session.close() 
+    logger.info("Bot session closed.")
+    
+    # 2. Остановка всех активных Telethon клиентов (если нужно)
+    tm = kwargs.get('tm')
+    if tm:
+        await tm.stop_all_workers()
+        logger.info("All Telethon workers stopped.")
+        
+    logger.info("Bot shutting down.")
+
 
 async def main():
     if not all([BOT_TOKEN, API_ID, API_HASH]):
         logger.critical("❌ One or more essential variables are missing. Check your config.py/ .env file.")
         sys.exit(1)
 
-    # 🟢 РЕГИСТРАЦИЯ MIDDLEWARE ДЛЯ ВНЕДРЕНИЯ ЗАВИСИМОСТЕЙ (ДО ВСЕХ РОУТЕРОВ)
-    dp.message.outer_middleware(DependencyInjectorMiddleware(DI_DATA))
-    dp.callback_query.outer_middleware(DependencyInjectorMiddleware(DI_DATA))
+    # 1. РЕГИСТРАЦИЯ MIDDLEWARE ДЛЯ ВНЕДРЕНИЯ ЗАВИСИМОСТЕЙ (db, tm, store)
+    di_middleware = DependencyInjectorMiddleware(DI_DATA)
+    dp.message.outer_middleware(di_middleware)
+    dp.callback_query.outer_middleware(di_middleware)
     
-    # Регистрация Middleware для RateLimit (после DI Middleware, чтобы иметь доступ к store)
+    # 2. Регистрация Middleware для RateLimit 
     rate_middleware = RateLimitMiddleware(store, limit=RATE_LIMIT_TIME)
     dp.message.outer_middleware(rate_middleware)
     dp.callback_query.outer_middleware(rate_middleware)
@@ -91,8 +119,10 @@ async def main():
     dp.include_router(admin_router)
     dp.include_router(drop_router) 
     
+    # Регистрация обработчиков жизненного цикла
     dp.startup.register(on_startup) 
-    
+    dp.shutdown.register(on_shutdown) # 🟢 РЕГИСТРАЦИЯ SHUTDOWN
+
     try:
         bot_info = await bot.get_me()
         logger.info(f"Bot connected successfully. @{bot_info.username}. Admin ID: {ADMIN_ID}")
@@ -102,8 +132,7 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Starting polling...")
-    # 🟢 ИСПРАВЛЕНИЕ: Запускаем без **DI_DATA
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, **DI_DATA) # 🟢 ПЕРЕДАЧА DI_DATA для on_startup/shutdown
 
 if __name__ == '__main__':
     if sys.platform == 'win32': 
