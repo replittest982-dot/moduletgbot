@@ -4,6 +4,7 @@ import os
 import qrcode
 import re
 from io import BytesIO
+from typing import Union, Optional
 
 from aiogram import Bot, Router, F
 from aiogram.fsm.context import FSMContext
@@ -12,13 +13,13 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.state import StatesGroup, State 
 from db import AsyncDatabase
 from telethon_manager import TelethonManager
-from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, QR_TIMEOUT
+from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, QR_TIMEOUT 
 
 logger = logging.getLogger(__name__)
 
 user_router = Router(name="user_router")
 admin_router = Router(name="admin_router")
-drop_router = Router(name="drop_router") # Оставлен для совместимости с TM, но не используется в main.py
+drop_router = Router(name="drop_router") 
 
 # --- 💡 FSM Состояния (StatesGroup) ---
 class TelethonAuth(StatesGroup): 
@@ -37,6 +38,12 @@ def check_valid_phone(phone: str) -> bool:
     """Проверяет, соответствует ли строка формату телефона +7..."""
     return bool(re.match(r'^\+\d{10,15}$', phone.replace(' ', '')))
 
+def get_user_id_from_update(update: Union[Message, CallbackQuery]) -> Optional[int]:
+    """Извлекает ID пользователя из сообщения или callback-запроса."""
+    if update.from_user:
+        return update.from_user.id
+    return None
+
 # --- MENUS & START ---
 def get_main_menu_kb(is_subscribed: bool, is_telethon_active: int, is_worker_running: bool, has_progress: bool, is_admin: bool) -> InlineKeyboardMarkup:
     kb = []
@@ -48,7 +55,6 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: int, is_worker_run
     ])
     
     if is_subscribed or is_admin:
-        # is_telethon_active: 0-inactive, 1-ready (authorized but not running), 2-running
         if is_telethon_active == 0:
             kb.append([
                 InlineKeyboardButton(text="📱 Вход по QR-коду", callback_data="auth_qr"),
@@ -116,8 +122,9 @@ async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: AsyncDatabase, tm:
     try: await callback.message.delete()
     except Exception: pass
 
+# ✅ ФИКС 1: Добавлен явный bot
 @user_router.callback_query(F.data == "info_sub")
-async def cb_info_sub(callback: CallbackQuery, db: AsyncDatabase, **kwargs):
+async def cb_info_sub(callback: CallbackQuery, bot: Bot, db: AsyncDatabase, **kwargs):
     is_subscribed, sub_status_text = await db.get_subscription_status(callback.from_user.id, ADMIN_ID)
     await callback.answer(f"Статус подписки: {sub_status_text}", show_alert=True)
     
@@ -259,7 +266,6 @@ async def auth_get_qr_pass(message: Message, state: FSMContext, bot: Bot, db: As
 # --- WORKER COMMANDS ---
 @user_router.callback_query(F.data == "worker_start")
 async def cb_work_start(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
-    # ✅ ИСПРАВЛЕНИЕ: Добавлен await
     await callback.answer("Запуск...")
     if await tm.start_client_task(callback.from_user.id): 
         await callback.message.answer("✅ Worker запущен в фоновом режиме.")
@@ -297,12 +303,13 @@ async def promo_proc(message: Message, state: FSMContext, db: AsyncDatabase, bot
         await message.answer("Попробуйте другой промокод или нажмите /start для выхода в меню.")
 
 # --- ADMIN ---
+# ✅ ФИКС 2: Добавлен явный bot
 @admin_router.callback_query(F.data == "admin_panel")
-async def cb_admin(callback: CallbackQuery, **kwargs):
+async def cb_admin(callback: CallbackQuery, bot: Bot, **kwargs):
     if callback.from_user.id != ADMIN_ID: return
     text = (
         "👑 **Админ-Панель**\n"
-        "Создание промокода: /create_promo\n" 
+        "Создание промокода: /create_promo\n"
         "Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`\n"
         "Пример: `/create_promo TEST 30 10`"
     )
@@ -327,3 +334,5 @@ async def cmd_mk_promo(message: Message, db: AsyncDatabase, **kwargs):
         await message.answer(f"✅ Промокод **{code}** создан: {days} дней, {max_uses} использований.")
     else: 
         await message.answer(f"❌ Ошибка: промокод **{code}** уже существует?")
+
+user_router, admin_router, drop_router = user_router, admin_router, drop_router
