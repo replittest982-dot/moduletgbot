@@ -20,12 +20,6 @@ logger = logging.getLogger(__name__)
 async def on_startup(*args, **kwargs):
     logger.info("Starting up...")
     
-    # Извлечение зависимостей (переданы через DI)
-    # Но так как on_startup вызывается через lambda, 
-    # аргументы будут в kwargs, если мы их туда передадим,
-    # или мы можем использовать замыкание (как сделано ниже в main).
-    # Здесь просто логируем.
-    
     os.makedirs(SESSIONS_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -54,7 +48,6 @@ async def main():
 
     injector = DependencyInjectorMiddleware(data={'db': db, 'tm': tm, 'store': store, 'bot': bot})
     
-    # Глобальная регистрация middleware
     dp.message.outer_middleware(injector)
     dp.callback_query.outer_middleware(injector)
 
@@ -62,7 +55,7 @@ async def main():
     dp.include_router(user_router)
     dp.include_router(drop_router)
     
-    # Ручной запуск сервисов
+    # Ручной запуск
     await on_startup()
     await start_services(bot, db, tm)
 
@@ -74,6 +67,10 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
+    if not BOT_TOKEN:
+        print("❌ ОШИБКА: Заполните BOT_TOKEN в .env")
+        sys.exit(1)
+        
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
