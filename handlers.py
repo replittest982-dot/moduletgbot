@@ -10,8 +10,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
 from aiogram.fsm.state import StatesGroup, State 
-
-# Импорт реальных компонентов
 from db import AsyncDatabase
 from telethon_manager import TelethonManager
 from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, QR_TIMEOUT
@@ -20,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 user_router = Router(name="user_router")
 admin_router = Router(name="admin_router")
-drop_router = Router(name="drop_router")
+drop_router = Router(name="drop_router") # Оставлен для совместимости с TM, но не используется в main.py
 
 # --- 💡 FSM Состояния (StatesGroup) ---
 class TelethonAuth(StatesGroup): 
@@ -86,10 +84,8 @@ async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     is_subscribed_bool, sub_status_text = await db.get_subscription_status(uid, ADMIN_ID)
     user_data = await db.get_user(uid) 
     
-    # 0 - inactive, 1 - ready, 2 - running
     is_telethon_active = user_data.get('telethon_active', 0) 
     
-    # Безопасный доступ к tm.store (Worker status)
     is_worker_running = uid in tm.store.active_workers
     has_progress = uid in tm.store.process_progress
     
@@ -97,13 +93,11 @@ async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     
     if is_initial_check and not is_subscribed_bool and not is_admin:
         try:
-            # Проверка подписки
             member = await bot.get_chat_member(TARGET_CHANNEL_URL, uid)
             if member.status not in ['member', 'creator', 'administrator']:
                 return await bot.send_message(chat_id, f"⚠️ Доступ ограничен. Подпишитесь на: **{TARGET_CHANNEL_URL}**", 
                                               reply_markup=get_main_menu_kb(False, is_telethon_active, False, False, is_admin))
         except Exception: 
-            # ChannelPrivateError или другая ошибка проверки
             return await bot.send_message(chat_id, f"⚠️ Не удалось проверить подписку. Убедитесь, что вы подписаны на **{TARGET_CHANNEL_URL}**.", 
                                           reply_markup=get_main_menu_kb(False, is_telethon_active, False, False, is_admin))
 
@@ -179,14 +173,13 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         return await callback.message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
         
     try:
-        url = await tm.start_qr_login(callback.from_user.id) 
+        url, qr_login_object = await tm.start_qr_login(callback.from_user.id) 
     except Exception as e: 
         logger.error(f"QR Login start error: {e}")
         return await callback.message.answer(f"❌ Ошибка: {e}")
     
     bio = BytesIO()
     try:
-        # Генерация QR-кода
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(url)
         qr.make(fit=True)
@@ -221,9 +214,8 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
     qr_check_task = None
     
     try:
-        # ✅ ИСПРАВЛЕНИЕ 5: Оборачиваем awaitable в Task перед wait_for
         qr_check_task = asyncio.create_task(
-            tm.check_qr_login(callback.from_user.id, data['qr_login_data'], data['client'])
+            tm.check_qr_login(callback.from_user.id, qr_login_object, data['client'])
         )
         success, msg = await asyncio.wait_for(
             qr_check_task, 
@@ -267,17 +259,17 @@ async def auth_get_qr_pass(message: Message, state: FSMContext, bot: Bot, db: As
 # --- WORKER COMMANDS ---
 @user_router.callback_query(F.data == "worker_start")
 async def cb_work_start(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
+    # ✅ ИСПРАВЛЕНИЕ: Добавлен await
     await callback.answer("Запуск...")
     if await tm.start_client_task(callback.from_user.id): 
         await callback.message.answer("✅ Worker запущен в фоновом режиме.")
     else: 
         await callback.message.answer("❌ Ошибка запуска. Сессия устарела или недействительна. Попробуйте войти заново.", show_alert=True)
-        # Если запуск не удался, статус будет 0 (inactive) благодаря stop_worker в tm
     await send_start_menu(callback.from_user.id, bot, db, tm)
 
 @user_router.callback_query(F.data == "worker_stop")
 async def cb_work_stop(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
-    await tm.stop_worker(callback.from_user.id, delete_session=False) # Не удаляем сессию, просто останавливаем
+    await tm.stop_worker(callback.from_user.id, delete_session=False) 
     await callback.answer("Остановлен.")
     await send_start_menu(callback.from_user.id, bot, db, tm)
 
