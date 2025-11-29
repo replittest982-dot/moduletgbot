@@ -56,10 +56,9 @@ class TelethonManager:
         """Регистрирует обработчики событий Telethon для данного клиента."""
         @client.on(events.NewMessage()) 
         async def handle_new_message(event):
-            # Пример: Воркер обрабатывает сообщение в личке, где есть слово "status"
+            # ВОРКЕР: Здесь будет ваша логика Drop-системы
             if event.raw_text and "status" in event.raw_text.lower() and event.is_private:
                 logger.info(f"Worker {user_id} detected 'status' message.")
-                # await client.send_message(event.chat_id, "Worker is active!")
             
         logger.info(f"Handlers registered for worker {user_id}.")
 
@@ -121,28 +120,103 @@ class TelethonManager:
 
     async def start_auth(self, user_id: int) -> Tuple[bool, Optional[str]]:
         """Инициализирует процесс авторизации."""
-        # ... (логика start_auth) ...
-        # Оставлено как в предыдущем ответе
-        return (False, None) 
+        session_path = self._get_session_path(user_id)
+        
+        # 1. Если уже авторизуется, сбрасываем
+        if user_id in self.store.auth_in_progress:
+            await self.bot.send_message(user_id, "⚠️ **Предыдущая попытка авторизации отменена.** Начнем заново.")
+            await self._cleanup_session(user_id, self.store.auth_in_progress.pop(user_id))
+            
+        # 2. Если воркер уже запущен, останавливаем его
+        if user_id in self.store.active_clients:
+             await self.stop_worker(user_id, silent=True)
+             
+        # 3. Создаем новый клиент
+        client = TelegramClient(session_path, API_ID, API_HASH)
+        self.store.auth_in_progress[user_id] = client
+
+        try:
+            await client.connect()
+            if await client.is_user_authorized():
+                await self._finish_auth(user_id)
+                return True, "✅ Вы уже авторизованы! Воркер запущен."
+            
+            # Клиент готов к получению номера
+            return False, None # Начинаем FSM
+            
+        except Exception as e:
+            logger.error(f"Auth connection error for {user_id}: {e}")
+            await self._cleanup_session(user_id, client)
+            return False, f"❌ Ошибка подключения: {e}"
 
     async def send_code(self, user_id: int, phone: str) -> Optional[str]:
         """Отправляет код авторизации и возвращает phone_hash."""
-        # Оставлено как в предыдущем ответе
-        pass # Сокращено для читаемости
+        client = self.store.auth_in_progress.get(user_id)
+        if not client: return None
+        
+        try:
+            result = await client.send_code_request(phone)
+            self.store.store[user_id] = {'phone': phone, 'phone_hash': result.phone_code_hash}
+            return result.phone_code_hash
+            
+        except PhoneNumberInvalidError:
+            await self._cleanup_session(user_id, client)
+            return "❌ Неверный формат номера телефона."
+        except PhoneNumberUnoccupiedError:
+            await self._cleanup_session(user_id, client)
+            return "❌ Пользователь с таким номером не найден."
+        except FloodWaitError as e:
+            await self._cleanup_session(user_id, client)
+            return f"❌ Превышен лимит запросов. Попробуйте через {e.seconds} секунд."
+        except Exception as e:
+            logger.error(f"Send code error for {user_id}: {e}")
+            await self._cleanup_session(user_id, client)
+            return f"❌ Неизвестная ошибка: {e}"
 
     async def sign_in(self, user_id: int, phone: str, code: str, phone_hash: str) -> Tuple[bool, Optional[str]]:
         """Пытается войти, возвращает (success, result_message)."""
-        # Оставлено как в предыдущем ответе
-        pass # Сокращено для читаемости
+        client = self.store.auth_in_progress.get(user_id)
+        if not client: return False, "❌ Сессия авторизации утеряна."
+        
+        try:
+            await client.sign_in(phone, code, phone_hash=phone_hash)
+            await self._finish_auth(user_id)
+            return True, "✅ Успешный вход! Воркер запущен."
+            
+        except SessionPasswordNeededError:
+            return False, "⚠️ **Требуется двухфакторная аутентификация.** Введите ваш облачный пароль."
+        except PhoneCodeInvalidError:
+            return False, "❌ Неверный код. Попробуйте снова."
+        except (PhoneCodeEmptyError, PhoneCodeExpiredError):
+            return False, "❌ Код истек или недействителен. Начните /login заново."
+        except Exception as e:
+            logger.error(f"Sign in error for {user_id}: {e}")
+            await self._cleanup_session(user_id, client)
+            return False, f"❌ Неизвестная ошибка: {e}"
 
     async def sign_in_password(self, user_id: int, password: str) -> Tuple[bool, Optional[str]]:
         """Пытается войти, используя пароль 2FA."""
-        # Оставлено как в предыдущем ответе
-        pass # Сокращено для читаемости
+        client = self.store.auth_in_progress.get(user_id)
+        if not client: return False, "❌ Сессия авторизации утеряна."
+
+        try:
+            await client.sign_in(password=password)
+            await self._finish_auth(user_id)
+            return True, "✅ Успешный вход! Воркер запущен."
+            
+        except AuthKeyError:
+            await self._cleanup_session(user_id, client)
+            return False, "❌ Неверный пароль. Авторизуйтесь /login заново."
+        except Exception as e:
+            logger.error(f"Password sign in error for {user_id}: {e}")
+            await self._cleanup_session(user_id, client)
+            return False, f"❌ Неизвестная ошибка: {e}"
 
     async def _finish_auth(self, user_id: int):
         """Завершает процесс авторизации, запускает воркер, очищает временные данные."""
         client = self.store.auth_in_progress.pop(user_id, None)
+        self.store.store.pop(user_id, None) # Чистим временные данные
+        
         if client:
             if user_id in self.store.active_clients:
                  await self.store.active_clients[user_id].disconnect()
@@ -162,3 +236,4 @@ class TelethonManager:
             if os.path.exists(session_path): os.remove(session_path)
         if user_id in self.store.auth_in_progress:
             del self.store.auth_in_progress[user_id]
+        self.store.store.pop(user_id, None) # Чистим временные данные
