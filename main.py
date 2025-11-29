@@ -2,15 +2,15 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.fsm.storage.memory import MemoryStorage
+# 💡 ИСПРАВЛЕНИЕ: Добавлен импорт DefaultBotProperties для корректной установки parse_mode
+from aiogram.client.default import DefaultBotProperties
 
 # 💡 ВАЖНО: Убедитесь, что вы импортируете все нужные файлы
-# Вам нужно заменить это на реальные импорты
 from config import BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, TEMP_DIR 
 from handlers import user_router, admin_router, drop_router
 from telethon_manager import TelethonManager
 
 # --- Заглушки для типов (УДАЛИТЕ И ЗАМЕНИТЕ НА РЕАЛЬНЫЕ ИМПОРТЫ!) ---
-# Я включаю эти заглушки для демонстрации, но в вашем реальном коде они должны быть удалены
 class AsyncDatabase: 
     async def init(self): pass
     async def get_subscription_status(self, uid, admin_id): return (True, "Активна")
@@ -33,37 +33,35 @@ logging.basicConfig(level=logging.INFO)
 async def main():
     # 1. Инициализация
     
-    # 💡 Инициализация БД и хранилища
     db = AsyncDatabase() 
     await db.init()
     store = GlobalStorage()
     
-    # 🚀 ИСПРАВЛЕНИЕ ОШИБКИ: Создание объекта конфигурации для TelethonManager
+    # 🚀 ИСПРАВЛЕНИЕ: Создание объекта конфигурации для TelethonManager (для TEMP_DIR)
     class Config:
         API_ID = API_ID
         API_HASH = API_HASH
-        TEMP_DIR = TEMP_DIR # Берем из config.py
+        TEMP_DIR = TEMP_DIR 
     
     config = Config()
 
     # 2. Инициализация TelethonManager
-    # 💡 ИСПРАВЛЕНИЕ: ПОРЯДОК АРГУМЕНТОВ: db, store, config
     tm = TelethonManager(db, store, config) 
     
     # 3. Инициализация Aiogram
-    bot = Bot(token=BOT_TOKEN, parse_mode='Markdown') # Используем Markdown для удобства
+    # 🚀 ИСПРАВЛЕНИЕ: Используем DefaultBotProperties для установки parse_mode
+    default_properties = DefaultBotProperties(parse_mode='Markdown') 
+    bot = Bot(token=BOT_TOKEN, default=default_properties)
+    
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
     # 4. Инжекция зависимостей и роутеры
-    
-    # Инжекция зависимостей в хендлеры
     dp.workflow_data.update(db=db, tm=tm, store=store, config=config, bot=bot)
 
     # Регистрация роутеров
     dp.include_router(user_router)
     
-    # Админ-роутер с фильтром по ID
     admin_router.message.filter(F.from_user.id == ADMIN_ID)
     admin_router.callback_query.filter(F.from_user.id == ADMIN_ID)
     dp.include_router(admin_router)
@@ -79,4 +77,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.warning("Bot stopped by user.")
     except Exception as e:
+        # Добавляем exc_info=True для полного трассировки ошибки
         logging.error(f"Fatal error: {e}", exc_info=True)
