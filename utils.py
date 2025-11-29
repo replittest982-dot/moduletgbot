@@ -3,12 +3,14 @@ import datetime
 import asyncio
 import logging
 import re
+import textwrap
 from typing import Dict, Any, Optional, Union, List, Tuple
 from contextlib import suppress
 from aiogram.fsm.state import StatesGroup, State 
 from aiogram.types import Message, CallbackQuery
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from telethon import TelegramClient
+from dateutil import parser # Добавлен для работы format_drop_report
 
 # УБРАНЫ ТОЧКИ ПЕРЕД ИМЕНАМИ МОДУЛЕЙ
 from config import SESSIONS_DIR, ADMIN_ID, MOSCOW_TZ
@@ -102,6 +104,39 @@ def format_timedelta(delta: datetime.timedelta) -> str:
     if minutes > 0: parts.append(f"{minutes} м.")
     if seconds > 0 or not parts: parts.append(f"{seconds} с.")
     return " ".join(parts[:3])
+
+def format_drop_report(session_data: dict) -> str:
+    """Форматирует данные сессии дропа в читаемый отчет."""
+    
+    try:
+        start_time = parser.isoparse(session_data['start_time']).astimezone(MOSCOW_TZ)
+        last_status_time = parser.isoparse(session_data['last_status_time']).astimezone(MOSCOW_TZ)
+    except Exception:
+         return "❌ Ошибка форматирования даты сессии."
+    
+    # Расчет времени работы
+    now_aware = datetime.datetime.now(MOSCOW_TZ)
+    total_time = now_aware - start_time
+    
+    # Расчет простоя
+    prosto_time = datetime.timedelta(seconds=session_data.get('prosto_seconds', 0))
+    work_time_delta = total_time - prosto_time
+
+    return textwrap.dedent(f"""
+        **📢 Отчет по сессии**
+        ---
+        **🖥️ ПК:** `{session_data['pc_name']}`
+        **👤 ID дропа:** `{session_data['drop_id']}`
+        **📞 Номер (ID):** `{session_data['phone']}`
+        **📊 Текущий статус:** `{session_data['status'].upper()}`
+        ---
+        **🟢 Время в работе:** {format_timedelta(work_time_delta)}
+        **🔴 Время простоя:** {format_timedelta(prosto_time)}
+        **⏳ Всего в сессии:** {format_timedelta(total_time)}
+        ---
+        **🕐 Старт:** {start_time.strftime('%H:%M:%S %d.%m')}
+        **🔄 Обновление:** {last_status_time.strftime('%H:%M:%S %d.%m')}
+    """).strip()
 
 class DependencyInjectorMiddleware(BaseMiddleware):
     def __init__(self, data: Dict[str, Any]):
