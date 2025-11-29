@@ -8,6 +8,7 @@ from contextlib import suppress
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage 
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import Dict # 🟢 НОВЫЙ ИМПОРТ
 
 # --- LOCAL IMPORTS ---
 from telethon_manager import TelethonManager, GlobalStorage
@@ -32,17 +33,23 @@ db_path = os.path.join('data', DB_NAME)
 db = AsyncDatabase(db_path)
 
 storage = MemoryStorage() 
-# 🟢 Инициализация 'bot' перед 'tm'
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='Markdown')) 
 dp = Dispatcher(storage=storage)
 
 # Передаем bot, store, db в менеджер Telethon
 tm = TelethonManager(bot, store, db) 
 
-# Инъекция зависимостей в роутеры
-user_router.db = db; user_router.tm = tm; user_router.store = store
-admin_router.db = db; admin_router.tm = tm; admin_router.store = store
-drop_router.db = db; drop_router.tm = tm; drop_router.store = store 
+# ❌ УДАЛЕНЫ НЕПРАВИЛЬНЫЕ СТРОКИ ИНЪЕКЦИИ
+# user_router.db = db; user_router.tm = tm; user_router.store = store
+# admin_router.db = db; admin_router.tm = tm; admin_router.store = store
+# drop_router.db = db; drop_router.tm = tm; drop_router.store = store 
+
+# 🟢 СОЗДАЕМ СЛОВАРЬ ЗАВИСИМОСТЕЙ
+DI_DATA: Dict = {
+    "db": db, 
+    "tm": tm, 
+    "store": store
+}
 
 # =========================================================================
 # II. STARTUP И ЗАПУСК
@@ -51,19 +58,16 @@ drop_router.db = db; drop_router.tm = tm; drop_router.store = store
 async def on_startup(dispatcher: Dispatcher, bot: Bot):
     logger.info("Bot starting up...")
     
-    # Регистрация команд в меню Telegram
     await set_default_commands(bot, ADMIN_ID)
     
-    # Создание папок и инициализация БД
     os.makedirs('data', exist_ok=True)
     os.makedirs('sessions', exist_ok=True)
     await db.init() 
     
-    # Запуск активных воркеров при старте
+    # Запуск активных воркеров
     active_users = await db.get_active_telethon_users() 
     for uid in active_users:
         if await db.check_subscription(uid): 
-            # Запускаем таску, чтобы не блокировать запуск
             asyncio.create_task(tm.start_client_task(uid)) 
         else:
             await db.set_telethon_status(uid, False) 
@@ -83,12 +87,11 @@ async def main():
     dp.message.outer_middleware(middleware)
     dp.callback_query.outer_middleware(middleware)
     
-    # Регистрация роутеров
+    # 🟢 РЕГИСТРАЦИЯ РОУТЕРОВ С ПЕРЕДАЧЕЙ ЗАВИСИМОСТЕЙ ЧЕРЕЗ **data
     dp.include_router(user_router)
     dp.include_router(admin_router)
     dp.include_router(drop_router) 
     
-    # Передаем бот в on_startup
     dp.startup.register(on_startup) 
     
     try:
@@ -100,7 +103,8 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Starting polling...")
-    await dp.start_polling(bot)
+    # 🟢 ПЕРЕДАЕМ DI_DATA В dp.start_polling
+    await dp.start_polling(bot, **DI_DATA)
 
 if __name__ == '__main__':
     if sys.platform == 'win32': 
