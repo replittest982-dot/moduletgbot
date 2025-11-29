@@ -7,19 +7,24 @@ from io import BytesIO
 from aiogram import Bot, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command, StateFilter
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 # ВАЖНО: Убедитесь, что эти импорты корректны для вашей структуры проекта
+# В вашем реальном проекте замените заглушки на фактические импорты
 from config import ADMIN_ID, SUPPORT_BOT_USERNAME, TARGET_CHANNEL_URL, QR_TIMEOUT
-# Импортируйте ваши классы из других файлов:
-# from utils import TelethonAuth, UserState, GlobalStorage, check_valid_phone
-# from db import AsyncDatabase
-# from telethon_manager import TelethonManager
 
-# --- Заглушки для типов (УДАЛИТЕ И ЗАМЕНИТЕ НА РЕАЛЬНЫЕ ИМПОРТЫ!) ---
-class AsyncDatabase: pass
+# --- Заглушки для типов и утилит (УДАЛИТЕ И ЗАМЕНИТЕ НА РЕАЛЬНЫЕ ИМПОРТЫ!) ---
+class AsyncDatabase: 
+    async def get_subscription_status(self, uid, admin_id): return (True, "Активна")
+    async def get_user(self, uid): return {'telethon_active': 0}
+    async def update_user(self, uid, **kwargs): pass
+    async def apply_promo_code(self, uid, code): return (False, "❌ Промокод не найден.")
 class TelethonManager: pass
-class TelethonAuth: # 💡 Пример состояний для FSM
+class GlobalStorage: pass
+class Config: pass
+
+# 💡 FSM Состояния
+class TelethonAuth: 
     PHONE = 'TelethonAuth:phone'
     CODE = 'TelethonAuth:code'
     PASSWORD = 'TelethonAuth:password'
@@ -27,8 +32,10 @@ class TelethonAuth: # 💡 Пример состояний для FSM
     QR_PASSWORD = 'TelethonAuth:qr_password'
 class UserState: 
     WAITING_FOR_PROMO_CODE = 'UserState:waiting_promo'
-class GlobalStorage: pass
-def check_valid_phone(phone): # Упрощенная заглушка проверки телефона
+
+# Упрощенная заглушка проверки телефона
+def check_valid_phone(phone): 
+    # Предполагаем, что телефон должен начинаться с '+' и иметь длину более 10 символов
     return len(phone) > 10 and phone.startswith('+')
 # --------------------------------------------------------
 
@@ -38,7 +45,7 @@ user_router = Router(name="user_router")
 admin_router = Router(name="admin_router")
 drop_router = Router(name="drop_router")
 
-# --- MENUS ---
+# --- MENUS & START ---
 def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_running: bool, has_progress: bool, is_admin: bool) -> InlineKeyboardMarkup:
     kb = []
     status_text = "🟢 Активна" if is_subscribed else "🔴 Не активна"
@@ -49,16 +56,13 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
     ])
     
     if is_subscribed or is_admin:
-        
         if not is_telethon_active:
-            # Кнопки входа
             kb.append([
                 InlineKeyboardButton(text="📱 Вход по QR-коду", callback_data="auth_qr"),
                 InlineKeyboardButton(text="🔑 Вход по Номеру", callback_data="auth_phone")
             ])
             kb.append([InlineKeyboardButton(text="🎁 Активировать Промокод", callback_data="user_promo")])
         else:
-            # Если есть активный Telethon аккаунт:
             worker_row = []
             if is_worker_running:
                 worker_row.append(InlineKeyboardButton(text="Worker Активен", callback_data="info_worker"))
@@ -75,7 +79,11 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
         if is_admin: kb.append([InlineKeyboardButton(text="👑 Админ-Панель", callback_data="admin_panel")])
     
     else:
-        kb.append([InlineKeyboardButton(text="Доступ к боту закрыт (Подписка)", callback_data="info_sub")])
+        # Кнопки для проверки подписки
+        kb.append([
+            InlineKeyboardButton(text="Подписаться", url=f"https://t.me/{TARGET_CHANNEL_URL.lstrip('@')}"),
+            InlineKeyboardButton(text="Я подписался", callback_data="check_subscription")
+        ])
 
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -84,21 +92,23 @@ async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     is_subscribed_bool, sub_status_text = await db.get_subscription_status(uid, ADMIN_ID)
     user_data = await db.get_user(uid) 
     is_telethon_active = user_data.get('telethon_active', 0)
-    is_worker_running = uid in tm.store.active_workers
-    has_progress = uid in tm.store.process_progress
+    is_worker_running = uid in tm.store.active_workers if tm and hasattr(tm, 'store') else False
+    has_progress = uid in tm.store.process_progress if tm and hasattr(tm, 'store') else False
     is_admin = uid == ADMIN_ID
     
+    # ⚠️ ВАЖНО: Если подписки нет, показываем только кнопки подписки.
     if is_initial_check and not is_subscribed_bool and not is_admin:
-        # Проверка подписки
         try:
             member = await bot.get_chat_member(TARGET_CHANNEL_URL, uid)
             if member.status not in ['member', 'creator', 'administrator']:
-                return await bot.send_message(chat_id, f"⚠️ Подпишитесь на: **{TARGET_CHANNEL_URL}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подписаться", url=f"https://t.me/{TARGET_CHANNEL_URL.lstrip('@')}")], [InlineKeyboardButton(text="Я подписался", callback_data="check_subscription")]]))
+                return await bot.send_message(chat_id, f"⚠️ Доступ ограничен. Подпишитесь на: **{TARGET_CHANNEL_URL}**", 
+                                              reply_markup=get_main_menu_kb(False, False, False, False, is_admin))
         except Exception: 
+            # Если не удалось проверить канал (например, бот не админ или канал приватный)
             pass
 
-    # Note: parse_mode='Markdown' используется по умолчанию благодаря исправлению в main.py
-    await bot.send_message(chat_id, f"🤖 Привет!\n**Подписка:** {sub_status_text}", reply_markup=get_main_menu_kb(is_subscribed_bool, is_telethon_active, is_worker_running, has_progress, is_admin))
+    await bot.send_message(chat_id, f"🤖 Привет!\n**Подписка:** {sub_status_text}", 
+                           reply_markup=get_main_menu_kb(is_subscribed_bool, is_telethon_active, is_worker_running, has_progress, is_admin))
 
 @user_router.message(Command("start"))
 async def cmd_start(message: Message, bot: Bot, db: AsyncDatabase, tm: TelethonManager, **kwargs):
@@ -108,9 +118,10 @@ async def cmd_start(message: Message, bot: Bot, db: AsyncDatabase, tm: TelethonM
 async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: AsyncDatabase, tm: TelethonManager, **kwargs):
     await callback.answer()
     await send_start_menu(callback.from_user.id, bot, db, tm, is_initial_check=True)
-    await callback.message.delete()
+    try: await callback.message.delete()
+    except Exception: pass
 
-# --- Auth ---
+# --- AUTH (Phone) ---
 @user_router.callback_query(F.data == "auth_phone")
 async def cb_auth_phone(callback: CallbackQuery, state: FSMContext, **kwargs):
     await state.clear()
@@ -153,6 +164,7 @@ async def auth_get_pass(message: Message, state: FSMContext, bot: Bot, db: Async
         await state.clear()
         await send_start_menu(message.from_user.id, bot, db, tm)
 
+# --- AUTH (QR) ---
 @user_router.callback_query(F.data == "auth_qr")
 async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
     await callback.answer("Генерация...")
@@ -161,7 +173,6 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         return await callback.message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
         
     try:
-        # 💡 ИСПРАВЛЕНИЕ: Получаем только URL, избегая .image
         url = await tm.start_qr_login(callback.from_user.id) 
     except Exception as e: 
         logger.error(f"QR Login start error: {e}")
@@ -169,7 +180,6 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
     
     bio = BytesIO()
     try:
-        # Генерация QR-кода из URL
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(url)
         qr.make(fit=True)
@@ -181,7 +191,6 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         await tm.stop_worker(callback.from_user.id, delete_session=True)
         return await callback.message.answer("❌ Ошибка при создании QR-кода. Попробуйте войти по номеру.")
     
-    # Отправляем QR-код
     photo_msg = await callback.message.answer_photo(bio, caption=f"Отсканируйте код. Действует **{QR_TIMEOUT}с**.")
     await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
     
@@ -192,7 +201,6 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         except Exception: pass
         return await callback.message.answer("❌ Сессия QR-авторизации утеряна. Попробуйте снова.")
 
-    # Ожидаем завершения QR-авторизации с таймаутом
     try:
         success, msg = await asyncio.wait_for(
             tm.check_qr_login(callback.from_user.id, data['qr_login_data'], data['client']), 
@@ -207,7 +215,6 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         await tm.stop_worker(callback.from_user.id, delete_session=True)
         msg = f"❌ Произошла ошибка при проверке QR: {e}"
 
-    # Удаляем сообщение с QR-кодом
     try: await photo_msg.delete() 
     except Exception: pass
 
@@ -230,8 +237,7 @@ async def auth_get_qr_pass(message: Message, state: FSMContext, bot: Bot, db: As
         await state.clear()
         await send_start_menu(message.from_user.id, bot, db, tm)
 
-
-# --- Worker и Logout ---
+# --- WORKER COMMANDS ---
 @user_router.callback_query(F.data == "worker_start")
 async def cb_work_start(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: AsyncDatabase, **kwargs):
     if await tm.start_client_task(callback.from_user.id): 
@@ -254,5 +260,50 @@ async def cb_logout(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: 
     await callback.answer("Сессия удалена.")
     await send_start_menu(callback.from_user.id, bot, db, tm)
 
-# --- Promo и Admin (сокращены для экономии места) ---
-# ... (Остальная логика Promo и Admin)
+# --- PROMO ---
+@user_router.callback_query(F.data == "user_promo")
+async def cb_promo(callback: CallbackQuery, state: FSMContext, **kwargs):
+    await state.set_state(UserState.WAITING_FOR_PROMO_CODE)
+    await callback.message.edit_text("Введи промокод:")
+
+@user_router.message(StateFilter(UserState.WAITING_FOR_PROMO_CODE))
+async def promo_proc(message: Message, state: FSMContext, db: AsyncDatabase, bot: Bot, tm: TelethonManager, **kwargs):
+    success, msg = await db.apply_promo_code(message.from_user.id, message.text.strip())
+    await message.answer(msg)
+    if success:
+        await state.clear()
+        await send_start_menu(message.from_user.id, bot, db, tm)
+    else:
+        await message.answer("Попробуйте другой промокод или нажмите /start для выхода в меню.")
+
+# --- ADMIN (Пример) ---
+@admin_router.callback_query(F.data == "admin_panel")
+async def cb_admin(callback: CallbackQuery, **kwargs):
+    if callback.from_user.id != ADMIN_ID: return
+    text = (
+        "👑 **Админ-Панель**\n"
+        "**Создание промокода:** /create_promo\n"
+        "Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`\n"
+        "Пример: `/create_promo TEST 30 10`"
+    )
+    await callback.message.answer(text)
+
+@admin_router.message(Command("create_promo"))
+async def cmd_mk_promo(message: Message, state: FSMContext, db: AsyncDatabase, **kwargs):
+    if message.from_user.id != ADMIN_ID: return
+    
+    parts = message.text.split()
+    if len(parts) != 4: 
+        return await message.answer("❌ Неверный формат. Ожидался: `/create_promo КОД ДНИ МАКС_ЮЗЕРОВ` (пример: `/create_promo TEST 30 10`)")
+    
+    try:
+        code = parts[1].strip().upper()
+        days = int(parts[2])
+        max_uses = int(parts[3])
+    except ValueError:
+        return await message.answer("❌ Дни и Макс_юзеров должны быть числами.")
+
+    if await db.create_promo_code(code, days, max_uses):
+        await message.answer(f"✅ Промокод **{code}** создан: {days} дней, {max_uses} использований.")
+    else: 
+        await message.answer(f"❌ Ошибка: промокод **{code}** уже существует?")
