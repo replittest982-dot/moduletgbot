@@ -32,18 +32,19 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
         InlineKeyboardButton(text="Справка", callback_data="info_help"),
         InlineKeyboardButton(text="Задать вопрос", url=f"https://t.me/{SUPPORT_BOT_USERNAME}")
     ])
-    if not is_subscribed and not is_admin:
-        # Если нет подписки и это не админ
-        kb.append([InlineKeyboardButton(text="Доступ к боту закрыт (Подписка)", callback_data="info_sub")])
-    else:
-        # Если есть подписка или это админ
+    
+    # Логика для пользователей с подпиской (включая админа, у которого подписка всегда активна)
+    if is_subscribed or is_admin:
+        # Если нет активного Telethon аккаунта: показываем кнопки входа и промокод
         if not is_telethon_active:
+            # 💡 ИСПРАВЛЕНИЕ: Кнопки входа и промокод для всех активных пользователей (включая тех, кто еще не вошел)
             kb.append([
                 InlineKeyboardButton(text="📱 Вход по QR-коду", callback_data="auth_qr"),
                 InlineKeyboardButton(text="🔑 Вход по Номеру", callback_data="auth_phone")
             ])
             kb.append([InlineKeyboardButton(text="🎁 Активировать Промокод", callback_data="user_promo")])
         else:
+            # Если есть активный Telethon аккаунт: показываем Worker и Выход
             worker_row = []
             if is_worker_running:
                 worker_row.append(InlineKeyboardButton(text="Worker Активен", callback_data="info_worker"))
@@ -53,9 +54,18 @@ def get_main_menu_kb(is_subscribed: bool, is_telethon_active: bool, is_worker_ru
             else:
                 worker_row.append(InlineKeyboardButton(text="Запустить Worker", callback_data="worker_start"))
                 worker_row.append(InlineKeyboardButton(text="Worker Остановлен", callback_data="info_worker"))
+            
             kb.append(worker_row)
+            # 💡 ИСПРАВЛЕНИЕ: Кнопка "Промокод" теперь на верхнем уровне, если вошли
             kb.append([InlineKeyboardButton(text="🎁 Промокод", callback_data="user_promo"), InlineKeyboardButton(text="❌ Выход", callback_data="auth_logout")])
-            if is_admin: kb.append([InlineKeyboardButton(text="👑 Админ-Панель", callback_data="admin_panel")])
+        
+        # Админ-Панель только для админа
+        if is_admin: kb.append([InlineKeyboardButton(text="👑 Админ-Панель", callback_data="admin_panel")])
+    
+    else:
+        # Если нет подписки и это не админ: показываем только заглушку
+        kb.append([InlineKeyboardButton(text="Доступ к боту закрыт (Подписка)", callback_data="info_sub")])
+
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 async def send_start_menu(chat_id: int, bot: Bot, db: AsyncDatabase, tm: TelethonManager, is_initial_check: bool = False):
@@ -142,17 +152,26 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, tm: TelethonMan
         return await callback.message.answer("⚠️ Уже есть активная сессия. Сначала выполните выход.")
         
     try:
-        url, img = await tm.start_qr_login(callback.from_user.id)
+        # 💡 ИСПРАВЛЕНИЕ: Ожидаем только URL, т.к. "image" может отсутствовать
+        # tm.start_qr_login должен возвращать URL
+        url = await tm.start_qr_login(callback.from_user.id) 
     except Exception as e: 
         logger.error(f"QR Login start error: {e}")
         return await callback.message.answer(f"❌ Ошибка: {e}")
     
     bio = BytesIO()
-    # Используем PIL Image, если доступен
-    if img: img.save(bio, 'PNG')
-    # Иначе генерируем QR-код сами
-    else: qrcode.make(url).save(bio, 'PNG') 
-    bio.seek(0)
+    try:
+        # Генерируем QR-код с помощью библиотеки qrcode, используя полученный URL
+        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        img.save(bio, 'PNG')
+        bio.seek(0)
+    except Exception as e:
+        logger.error(f"Error generating QR code image: {e}")
+        await tm.stop_worker(callback.from_user.id, delete_session=True)
+        return await callback.message.answer("❌ Ошибка при создании QR-кода. Попробуйте войти по номеру.")
     
     await callback.message.answer_photo(bio, caption=f"Отсканируйте код. Действует {QR_TIMEOUT}с.")
     await state.set_state(TelethonAuth.WAITING_FOR_QR_LOGIN)
@@ -242,7 +261,7 @@ async def cb_logout(callback: CallbackQuery, tm: TelethonManager, bot: Bot, db: 
 
 # --- Info ---
 @user_router.callback_query(F.data.startswith("info_"))
-async def cb_info(callback: CallbackQuery, db: AsyncDatabase, tm: TelethonManager, **kwargs):
+async def cb_info(callback: CallbackQuery, db: AsyncDatabase, tm: TelethonManager, bot: Bot, **kwargs):
     key = callback.data.split('_')[1]
     text = "Информация:\n"
     
@@ -250,12 +269,21 @@ async def cb_info(callback: CallbackQuery, db: AsyncDatabase, tm: TelethonManage
         _, status_text = await db.get_subscription_status(callback.from_user.id, ADMIN_ID)
         text = f"**Статус подписки:** {status_text}\n"
         text += "Для получения доступа приобретите подписку."
+        # Короткий ответ: используем show_alert
+        await callback.answer(text, show_alert=True)
+        return
+        
     elif key == 'worker':
         if callback.from_user.id in tm.store.active_workers:
             text = "Worker активен. Он слушает ваши исходящие сообщения в Телеграме, начиная с символа `.` (например, `.флуд`)."
         else:
             text = "Worker остановлен. Чтобы начать использовать команды, нажмите 'Запустить Worker'."
+        # Короткий ответ: используем show_alert
+        await callback.answer(text, show_alert=True)
+        return
+        
     elif key == 'help':
+        # Длинный ответ: отправляем как обычное сообщение
         text = textwrap.dedent("""
         **Доступные команды в Телеграме:**
         
@@ -274,8 +302,11 @@ async def cb_info(callback: CallbackQuery, db: AsyncDatabase, tm: TelethonManage
         **Команды для дропов:**
         * `.пкстарт <НазваниеПК>` - привязывает ПК к текущему чату/топику.
         """)
-        
-    await callback.answer(text, show_alert=True)
+        await callback.message.answer(text, parse_mode='Markdown')
+        await callback.answer() # Закрываем уведомление
+
+    else:
+        await callback.answer("Неизвестная информация.")
 
 
 # --- Promo ---
@@ -299,33 +330,42 @@ async def promo_proc(message: Message, state: FSMContext, db: AsyncDatabase, bot
 @admin_router.callback_query(F.data == "admin_panel")
 async def cb_admin(callback: CallbackQuery, **kwargs):
     if callback.from_user.id != ADMIN_ID: return
-    await callback.message.answer("Админ: `/create_promo`", parse_mode='Markdown')
+    # 💡 ИСПРАВЛЕНИЕ: Прямая подсказка по команде
+    await callback.message.answer(textwrap.dedent("""
+        **👑 Админ-Панель**
+        
+        * **Создание промокода:** `/create_promo`
+          * Формат: `КОД ДНИ МАКС_ЮЗЕРОВ`
+          * Пример: `/create_promo TEST 30 10`
+    """), parse_mode='Markdown')
     await callback.answer()
 
 @admin_router.message(Command("create_promo"))
 async def cmd_mk_promo(message: Message, state: FSMContext, **kwargs):
     if message.from_user.id != ADMIN_ID: return
-    await state.set_state(AdminState.CREATING_PROMO_CODE)
-    await message.answer("Формат: `КОД ДНИ МАКС_ЮЗЕРОВ` (пример: `TEST 30 10`)", parse_mode='Markdown')
-
-@admin_router.message(StateFilter(AdminState.CREATING_PROMO_CODE))
-async def proc_mk_promo(message: Message, state: FSMContext, db: AsyncDatabase, **kwargs):
+    # 💡 ИСПРАВЛЕНИЕ: Не переводим в FSM, а обрабатываем команду сразу (удобнее для админа)
+    
     parts = message.text.split()
-    if len(parts) != 3: 
-        return await message.answer("Неверный формат. Ожидался `КОД ДНИ МАКС_ЮЗЕРОВ`.")
+    if len(parts) != 4: 
+        return await message.answer("❌ Неверный формат. Ожидался: `/create_promo КОД ДНИ МАКС_ЮЗЕРОВ` (пример: `/create_promo TEST 30 10`)", parse_mode='Markdown')
+    
     try:
-        code = parts[0].strip().upper()
-        days = int(parts[1])
-        max_uses = int(parts[2])
+        code = parts[1].strip().upper()
+        days = int(parts[2])
+        max_uses = int(parts[3])
     except ValueError:
-        return await message.answer("Дни и Макс_юзеров должны быть числами.")
+        return await message.answer("❌ Дни и Макс_юзеров должны быть числами.")
+    except Exception:
+        return await message.answer("❌ Неверный формат команды.")
+
+    db = kwargs.get('db') # Получаем DB из зависимостей
+    if not db: return await message.answer("❌ Ошибка базы данных.")
 
     if await db.create_promo_code(code, days, max_uses):
         await message.answer(f"✅ Промокод **{code}** создан: {days} дней, {max_uses} использований.", parse_mode='Markdown')
-        await state.clear()
     else: 
-        await message.answer(f"❌ Ошибка (код **{code}** уже существует?).", parse_mode='Markdown')
-        await state.clear()
+        await message.answer(f"❌ Ошибка: промокод **{code}** уже существует?", parse_mode='Markdown')
+
 
 # --- Drop System ---
 @drop_router.message(Command("numb"))
