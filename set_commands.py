@@ -1,29 +1,21 @@
 from aiogram import Bot
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
-async def set_default_commands(bot: Bot, admin_id: int):
-    """
-    Регистрирует команды для пользователей и администратора.
-    """
-    
-    # 1. КОМАНДЫ ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
-    user_commands = [
-        BotCommand(command="start", description="👋 Начало работы и статус"),
-        BotCommand(command="login", description="🔑 Авторизация Telethon-аккаунта"),
-        BotCommand(command="logout", description="🛑 Остановка Telethon-воркера"),
-        BotCommand(command="promo", description="🎁 Активировать промокод"),
-    ]
-    
-    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
-    
-    # 2. КОМАНДЫ ДЛЯ АДМИНА
-    admin_commands = user_commands + [
-        BotCommand(command="admin", description="👑 Админ-панель"),
-        BotCommand(command="create_promo", description="🔑 Создать промокод"),
-    ]
-    
-    # Регистрируем команды только для ADMIN_ID
-    if admin_id:
-        await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+from .config import ADMIN_ID
 
-    print("✅ Команды бота успешно зарегистрированы.")
+async def set_default_commands(bot: Bot):
+    # Команды для всех пользователей (в ЛС бота)
+    commands = [
+        BotCommand(command="start", description="Главное меню"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    
+    # Дополнительные команды для админа
+    admin_commands = [
+        BotCommand(command="create_promo", description="Создать промокод (Админ)"),
+        BotCommand(command="stats", description="Показать статистику (Админ)"),
+    ]
+    await bot.set_my_commands(commands + admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+
+# Команды DROP-системы (для использования в чате, не регистрируются явно)
+# /numb, /num, /vstal, /error, /slet, /povt, /zm, /report_last, /report
