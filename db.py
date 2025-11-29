@@ -14,9 +14,8 @@ class AsyncDatabase:
         self.db_path = db_path
         self.TIMEZONE_MSK = TIMEZONE_MSK
 
-    # ... (методы get_current_time_msk, to_msk_aware, _calculate_new_end_date, init, get_user, get_active_telethon_users, set_telethon_status)
-    
-    # 🟢 ЗАГЛУШКА УДАЛЕНА: Методы работы с промокодами
+    # ... (Методы времени, init, get_user, set_telethon_status, и т.д. - остаются без изменений) ...
+
     async def create_promo_code(self, code: str, days: int, max_uses: int) -> bool:
         """Создает новый промокод."""
         now = self.get_current_time_msk().strftime('%Y-%m-%d %H:%M:%S')
@@ -29,7 +28,7 @@ class AsyncDatabase:
                 await db.commit()
                 return True
             except aiosqlite.IntegrityError:
-                return False # Код уже существует
+                return False
     
     async def apply_promo_code(self, user_id: int, code: str) -> Tuple[bool, str]:
         """Применяет промокод к пользователю."""
@@ -38,28 +37,21 @@ class AsyncDatabase:
             async with db.execute("SELECT * FROM promo_codes WHERE code=?", (code,)) as cursor:
                 promo = await cursor.fetchone()
             
-            if not promo:
-                return False, "❌ Промокод не найден."
-            
-            if not promo['is_active']:
-                return False, "❌ Промокод не активен."
-                
-            if promo['max_uses'] <= promo['current_uses']:
-                return False, "❌ Промокод исчерпал лимит использований."
+            if not promo: return False, "❌ Промокод не найден."
+            if not promo['is_active']: return False, "❌ Промокод не активен."
+            if promo['max_uses'] <= promo['current_uses']: return False, "❌ Промокод исчерпал лимит использований."
             
             user = await self.get_user(user_id)
-            
-            # 1. Рассчитываем новую дату
             new_end_date_str = self._calculate_new_end_date(user['subscription_end_date'], promo['days'])
             
-            # 2. Обновляем пользователя
+            # 1. Обновляем пользователя
             await db.execute("""
                 UPDATE users 
                 SET subscription_active=1, subscription_end_date=? 
                 WHERE user_id=?
             """, (new_end_date_str, user_id))
             
-            # 3. Обновляем использование промокода
+            # 2. Обновляем использование промокода
             new_uses = promo['current_uses'] + 1
             is_active = 1 if new_uses < promo['max_uses'] else 0
             await db.execute("""
@@ -73,6 +65,8 @@ class AsyncDatabase:
 
     async def check_subscription(self, user_id: int) -> bool:
         """Проверяет, активна ли подписка, и деактивирует, если срок истек."""
+        
+        # 🟢 ИСПРАВЛЕНО: Отложенный импорт tm для избежания цикла
         tm = None 
         try: from main import tm 
         except ImportError: pass 
@@ -103,5 +97,3 @@ class AsyncDatabase:
              await db.execute("UPDATE users SET subscription_active=?, subscription_end_date=? WHERE user_id=?", 
                              (1 if active else 0, end_date_str, user_id))
              await db.commit()
-             
-    # ... (другие методы)
