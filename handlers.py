@@ -8,13 +8,13 @@ from typing import Any
 
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
 
-# ✅ ИМПОРТЫ
+# ✅ ИМПОРТЫ ПРОЕКТА
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
 
@@ -55,9 +55,31 @@ def get_admin_panel_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="check_subscription")]
     ])
 
+# ✅ ДОБАВЛЕНА: Клавиатура для пользователя
+def get_user_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
+    kb = [
+        [InlineKeyboardButton(text="🔑 Авторизация (QR)", callback_data="auth_qr")],
+        [InlineKeyboardButton(text="⭐ Профиль / Подписка", callback_data="check_subscription")],
+    ]
+    if is_admin:
+        kb.append([InlineKeyboardButton(text="👑 Админ-Панель", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: TelethonManager, force_main: bool = False):
-    """ЗАМЕНИ НА СВОЮ ЛОГИКУ МЕНЮ"""
-    await bot.send_message(user_id, "✅ Главное меню (замени эту функцию!)")
+    """
+    ✅ ФИКС: Рабочая логика для отображения меню.
+    """
+    # Предполагаем, что admin_id доступен в dp, но в этой функции мы его не берем,
+    # поэтому используем хардкод (вам нужно заменить на ваш admin_id)
+    ADMIN_ID_HACK = 7868097991 # Замените на фактический ADMIN_ID из config
+    is_admin = user_id == ADMIN_ID_HACK
+    
+    text = f"👋 Добро пожаловать!\n\nЭто ваше основное меню.\n\n"
+    keyboard = get_user_menu_kb(is_admin)
+
+    await bot.send_message(user_id, text, reply_markup=keyboard)
+
 
 # --- ОБРАБОТЧИК /START ---
 
