@@ -8,13 +8,13 @@ from typing import Any
 
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
-from aiogram.filters import Command, CommandStart # ✅ ДОБАВЛЕН ИМПОРТ CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
 
-# ✅ ИМПОРТЫ ПРОЕКТА (константы будут взяты из kwargs)
+# ✅ ИМПОРТЫ
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
 
@@ -59,19 +59,19 @@ async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     """ЗАМЕНИ НА СВОЮ ЛОГИКУ МЕНЮ"""
     await bot.send_message(user_id, "✅ Главное меню (замени эту функцию!)")
 
-# --- ОБРАБОТЧИК /START (КРИТИЧЕСКИ ВАЖНЫЙ ФИКС) ---
+# --- ОБРАБОТЧИК /START ---
 
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, **kwargs):
-    """Обрабатывает команду /start и вызывает главное меню."""
+    """
+    ✅ ФИКС ИЗВЛЕЧЕНИЯ: db и tm берутся напрямую из kwargs.
+    Обрабатывает команду /start и вызывает главное меню.
+    """
     bot: Bot = kwargs["bot"]
-    db: AsyncDatabase = kwargs["dp"]["db"]
-    tm: TelethonManager = kwargs["dp"]["tm"]
+    db: AsyncDatabase = kwargs["db"]  # <-- ИСПРАВЛЕНО
+    tm: TelethonManager = kwargs["tm"]  # <-- ИСПРАВЛЕНО
     
-    # Очищаем состояние
     await state.clear() 
-    
-    # Вызываем функцию для отображения меню
     await send_start_menu(message.from_user.id, bot, db, tm)
 
 
@@ -79,8 +79,11 @@ async def cmd_start(message: Message, state: FSMContext, **kwargs):
 
 @admin_router.callback_query(F.data == "admin_panel")
 async def cb_admin(callback: CallbackQuery, **kwargs):
-    """Отображает Админ-Панель."""
-    admin_id: int = kwargs["dp"]["admin_id"]
+    """
+    ✅ ФИКС ИЗВЛЕЧЕНИЯ: admin_id берется напрямую из kwargs.
+    Отображает Админ-Панель.
+    """
+    admin_id: int = kwargs["admin_id"]  # <-- ИСПРАВЛЕНО
     if callback.from_user.id != admin_id:
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
     
@@ -92,8 +95,11 @@ async def cb_admin(callback: CallbackQuery, **kwargs):
 
 @admin_router.callback_query(F.data == "admin_give_sub")
 async def cb_admin_give_sub_start(callback: CallbackQuery, state: FSMContext, **kwargs):
-    """Начало FSM для выдачи подписки."""
-    admin_id: int = kwargs["dp"]["admin_id"]
+    """
+    ✅ ФИКС ИЗВЛЕЧЕНИЯ: admin_id берется напрямую из kwargs.
+    Начало FSM для выдачи подписки.
+    """
+    admin_id: int = kwargs["admin_id"]  # <-- ИСПРАВЛЕНО
     if callback.from_user.id != admin_id: return
     
     await state.set_state(AdminState.waiting_give_sub)
@@ -102,11 +108,14 @@ async def cb_admin_give_sub_start(callback: CallbackQuery, state: FSMContext, **
 
 @admin_router.message(AdminState.waiting_give_sub)
 async def admin_give_sub_proc(message: Message, state: FSMContext, **kwargs):
-    """Обработка ввода данных для выдачи подписки."""
+    """
+    ✅ ФИКС ИЗВЛЕЧЕНИЯ: db, tm, admin_id берутся напрямую из kwargs.
+    Обработка ввода данных для выдачи подписки.
+    """
     bot: Bot = kwargs["bot"]
-    db: AsyncDatabase = kwargs["dp"]["db"]
-    tm: TelethonManager = kwargs["dp"]["tm"]
-    admin_id: int = kwargs["dp"]["admin_id"]
+    db: AsyncDatabase = kwargs["db"]  # <-- ИСПРАВЛЕНО
+    tm: TelethonManager = kwargs["tm"]  # <-- ИСПРАВЛЕНО
+    admin_id: int = kwargs["admin_id"]  # <-- ИСПРАВЛЕНО
     
     if message.from_user.id != admin_id: return
     
@@ -148,8 +157,11 @@ async def admin_give_sub_proc(message: Message, state: FSMContext, **kwargs):
 
 @admin_router.callback_query(F.data == "admin_create_promo")
 async def cb_admin_create_promo_start(callback: CallbackQuery, state: FSMContext, **kwargs):
-    """Начало FSM для создания промокода."""
-    admin_id: int = kwargs["dp"]["admin_id"]
+    """
+    ✅ ФИКС ИЗВЛЕЧЕНИЯ: admin_id берется напрямую из kwargs.
+    Начало FSM для создания промокода.
+    """
+    admin_id: int = kwargs["admin_id"]  # <-- ИСПРАВЛЕНО
     if callback.from_user.id != admin_id: return
     
     await state.set_state(AdminState.waiting_promo_params)
@@ -158,11 +170,14 @@ async def cb_admin_create_promo_start(callback: CallbackQuery, state: FSMContext
 
 @admin_router.message(AdminState.waiting_promo_params)
 async def admin_create_promo_proc(message: Message, state: FSMContext, **kwargs):
-    """Обработка ввода параметров промокода."""
-    db: AsyncDatabase = kwargs["dp"]["db"]
+    """
+    ✅ ФИКС ИЗВЛЕЧЕНИЯ: db, tm, admin_id берутся напрямую из kwargs.
+    Обработка ввода параметров промокода.
+    """
+    db: AsyncDatabase = kwargs["db"]  # <-- ИСПРАВЛЕНО
     bot: Bot = kwargs["bot"]
-    tm: TelethonManager = kwargs["dp"]["tm"]
-    admin_id: int = kwargs["dp"]["admin_id"]
+    tm: TelethonManager = kwargs["tm"]  # <-- ИСПРАВЛЕНО
+    admin_id: int = kwargs["admin_id"]  # <-- ИСПРАВЛЕНО
     
     if message.from_user.id != admin_id: return
     
@@ -189,11 +204,14 @@ async def admin_create_promo_proc(message: Message, state: FSMContext, **kwargs)
 
 @user_router.callback_query(F.data == "auth_qr")
 async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
-    """Инициация QR-авторизации и генерация QR-кода."""
-    tm: TelethonManager = kwargs["dp"]["tm"]
+    """
+    ✅ ФИКС ИЗВЛЕЧЕНИЯ: tm, db, qr_timeout берутся напрямую из kwargs.
+    Инициация QR-авторизации и генерация QR-кода.
+    """
+    tm: TelethonManager = kwargs["tm"]  # <-- ИСПРАВЛЕНО
     bot: Bot = kwargs["bot"]
-    db: AsyncDatabase = kwargs["dp"]["db"]
-    qr_timeout: int = kwargs["dp"].get("qr_timeout", 120) 
+    db: AsyncDatabase = kwargs["db"]  # <-- ИСПРАВЛЕНО
+    qr_timeout: int = kwargs.get("qr_timeout", 120)  # <-- ИСПРАВЛЕНО
 
     await callback.answer("🔄 Генерация QR-кода...")
     
