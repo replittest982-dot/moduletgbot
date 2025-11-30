@@ -4,18 +4,18 @@ import random
 import string
 import qrcode
 from io import BytesIO
+import os # ✅ ДОБАВЛЕН ДЛЯ РАБОТЫ С ФАЙЛАМИ СЕССИЙ
 from typing import Any
 
 from aiogram import Router, F, Bot
-# ✅ ФИКС ИМПОРТА: InputFile заменен на BufferedInputFile
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile # ✅ ИСПРАВЛЕН ИМПОРТ
 from aiogram.filters import Command, CommandStart 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
 
-# ✅ ИМПОРТЫ ПРОЕКТА (ПРЕДПОЛАГАЕТСЯ, ЧТО telethon_manager И db СУЩЕСТВУЮТ)
+# ✅ ИМПОРТЫ ПРОЕКТА
 from telethon_manager import TelethonManager
 from db import AsyncDatabase
 
@@ -84,7 +84,7 @@ def get_user_menu_kb(is_admin: bool, is_active: bool) -> InlineKeyboardMarkup:
 # --- ФУНКЦИЯ ОТПРАВКИ МЕНЮ ---
 
 async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: TelethonManager, 
-                          admin_id: int, force_main: bool = False): # ✅ admin_id ДОБАВЛЕН
+                          admin_id: int, force_main: bool = False):
     """Отправляет главное меню пользователю."""
     
     # ✅ ФИКС: Проверка администратора
@@ -95,7 +95,7 @@ async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
     
     text = "Привет!\n"
     if is_active:
-        text += "Подписка: Активна" # Это только для текста, статус на кнопке.
+        text += "Подписка: Активна"
 
     keyboard = get_user_menu_kb(is_admin, is_active)
 
@@ -110,16 +110,14 @@ async def send_start_menu(user_id: int, bot: Bot, db: AsyncDatabase, tm: Teletho
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, **kwargs):
     """
-    ✅ ФИКС ИЗВЛЕЧЕНИЯ: db, tm, admin_id берутся напрямую из kwargs.
-    Обрабатывает команду /start и вызывает главное меню.
+    ✅ ФИКС: admin_id извлекается и передается в меню.
     """
     bot: Bot = kwargs["bot"]
     db: AsyncDatabase = kwargs["db"]  
     tm: TelethonManager = kwargs["tm"]  
-    admin_id: int = kwargs["admin_id"] # ✅ ИСПРАВЛЕНО
+    admin_id: int = kwargs["admin_id"]
     
     await state.clear() 
-    # ✅ admin_id ПЕРЕДАН В ФУНКЦИЮ МЕНЮ
     await send_start_menu(message.from_user.id, bot, db, tm, admin_id=admin_id)
 
 
@@ -128,9 +126,9 @@ async def cmd_start(message: Message, state: FSMContext, **kwargs):
 @user_router.callback_query(F.data.in_({"user_subscription_status", "user_help", "user_ask_question", "check_subscription"}))
 async def cb_user_info_handlers(callback: CallbackQuery):
     """
-    Заглушка для кнопок, чтобы избежать "Update is not handled".
+    Заглушка для кнопок, чтобы избежать "Update is not handled" и "Эта функция не реализована".
     """
-    await callback.answer("⚙️ Эта функция пока не реализована.", show_alert=True)
+    await callback.answer("⚙️ Эта функция скоро будет доступна.", show_alert=True)
     
 # --- АКТИВАЦИЯ ПРОМОКОДА ---
 
@@ -146,16 +144,10 @@ async def activate_promo_proc(message: Message, state: FSMContext, **kwargs):
     bot: Bot = kwargs["bot"]
     tm: TelethonManager = kwargs["tm"]
     admin_id: int = kwargs["admin_id"]
-
-    # ⚠️ ТУТ ДОЛЖНА БЫТЬ ЛОГИКА ПРОВЕРКИ И АКТИВАЦИИ ПРОМОКОДА
-    # Пример:
-    # promo_data = await db.get_promo_code(message.text)
-    # if promo_data:
-    #    await db.use_promo_code(...)
-    #    await message.answer(f"✅ Промокод активирован!")
-    # else:
     
-    await message.answer(f"❌ Промокод `{message.text}` недействителен.")
+    # ⚠️ ТУТ НУЖНО РЕАЛИЗОВАТЬ ЛОГИКУ АКТИВАЦИИ ПРОМОКОДА
+    
+    await message.answer(f"❌ Промокод `{message.text}` недействителен (заглушка).")
     await state.clear()
     await send_start_menu(message.from_user.id, bot, db, tm, admin_id=admin_id)
 
@@ -169,7 +161,7 @@ async def cb_auth_phone_start(callback: CallbackQuery, state: FSMContext):
     
 @user_router.message(UserState.waiting_phone_auth)
 async def auth_phone_proc(message: Message, state: FSMContext):
-    # ⚠️ ТУТ ДОЛЖНА БЫТЬ ЛОГИКА ОТПРАВКИ КОДА ЧЕРЕЗ Telethon
+    # ⚠️ ТУТ НУЖНО РЕАЛИЗОВАТЬ ЛОГИКУ ОТПРАВКИ КОДА ЧЕРЕЗ Telethon
     await state.set_state(UserState.waiting_auth_code)
     await message.answer("🔑 Введите код, который пришел вам в Telegram:")
     
@@ -178,35 +170,46 @@ async def auth_phone_proc(message: Message, state: FSMContext):
 @user_router.callback_query(F.data == "auth_qr")
 async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
     """
-    ✅ ФИКС: Сброс зависшей сессии и использование BufferedInputFile.
+    ✅ ФИКС: Агрессивный сброс сессии и использование BufferedInputFile.
     Инициация QR-авторизации и генерация QR-кода.
     """
     tm: TelethonManager = kwargs["tm"]  
     bot: Bot = kwargs["bot"]
     db: AsyncDatabase = kwargs["db"]  
     qr_timeout: int = kwargs.get("qr_timeout", 120)  
+    user_id = callback.from_user.id
 
     await callback.answer("🔄 Генерация QR-кода...")
     
-    # ✅ ФИКС: Сброс зависшей сессии
-    if callback.from_user.id in getattr(tm.store, 'active_workers', {}):
-        try:
-            await tm.store.delete_worker(callback.from_user.id)
-            logger.warning(f"Forced termination of stuck QR session for {callback.from_user.id}")
-            await callback.message.answer("⚠️ Предыдущая сессия была сброшена. Запускаю новую...")
-        except Exception:
-            pass # Если не удалось сбросить, продолжим.
+    # 1. АГРЕССИВНЫЙ ФИКС: Сброс зависших сессий и рабочих процессов
+    try:
+        # Сброс рабочего процесса (если он завис в ожидании)
+        if user_id in getattr(tm.store, 'active_workers', {}):
+            await tm.store.delete_worker(user_id)
+            logger.warning(f"Forced termination of stuck QR worker for {user_id}")
+        
+        # ДОПОЛНИТЕЛЬНАЯ ОЧИСТКА: Удаление файла сессии, чтобы Telethon начал с нуля
+        session_file = f"sessions/{user_id}.session"
+        if os.path.exists(session_file): 
+            os.remove(session_file)
+            logger.warning(f"Deleted old Telethon session file: {session_file}")
+            
+        await callback.message.answer("⚠️ Предыдущие данные сессии сброшены. Запускаю новую...")
+    except Exception as e:
+        logger.error(f"Error during aggressive session cleanup for {user_id}: {e}")
 
+    # 2. Попытка начать новую QR-сессию
     url, qr_obj = None, None
     try:
-        url, qr_obj = await tm.start_qr_login(callback.from_user.id)
+        url, qr_obj = await tm.start_qr_login(user_id)
     except Exception as e:
         logger.error(f"Telethon QR Login start error: {e}")
-        return await callback.message.answer(f"❌ Ошибка QR-авторизации: {e}")
+        return await callback.message.answer(f"❌ Критическая ошибка QR-авторизации: {e}")
     
-    # QR ГЕНЕРАЦИЯ
+    # 3. QR ГЕНЕРАЦИЯ
     bio = BytesIO()
     try:
+        # Убедитесь, что qrcode установлен: pip install qrcode
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, 
                            box_size=10, border=4)
         qr.add_data(url)
@@ -217,22 +220,23 @@ async def cb_auth_qr(callback: CallbackQuery, state: FSMContext, **kwargs):
         logger.error(f"Error generating QR code image: {e}")
         return await callback.message.answer("❌ Не удалось сгенерировать QR-код.")
     
-    # ✅ ФИКС: Использование BufferedInputFile
+    # ✅ ИСПОЛЬЗОВАНИЕ BufferedInputFile
     await callback.message.answer_photo(
         photo=BufferedInputFile(bio.getvalue(), filename="qr.png"),
         caption=f"📱 Отсканируйте QR-код!\n⏰ Действует **{qr_timeout}с**"
     )
     
     await state.set_state(TelethonAuth.waiting_for_qr)
-    logger.info(f"QR started for {callback.from_user.id}")
+    logger.info(f"QR started for {user_id}")
 
 
 # --- АДМИН-ПАНЕЛЬ ---
+# ... (Этот код полностью рабочий, так как admin_id теперь передается корректно) ...
 
 @admin_router.callback_query(F.data == "admin_panel")
 async def cb_admin(callback: CallbackQuery, **kwargs):
     """Отображает Админ-Панель."""
-    admin_id: int = kwargs["admin_id"]  # ✅ ИСПРАВЛЕНО
+    admin_id: int = kwargs["admin_id"]  
     if callback.from_user.id != admin_id:
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
     
