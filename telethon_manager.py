@@ -1,217 +1,148 @@
-import asyncio 
-import logging
+# telethon_manager.py
+
 import os
-import shutil
-import time
-from telethon import TelegramClient, events
-from telethon.tl.types import PeerUser
-from telethon.errors import SessionPasswordNeededError, FloodWaitError, AuthKeyUnregisteredError, PasswordHashInvalidError, PhoneCodeInvalidError
-from telethon.sessions import StringSession
+import asyncio
+import logging
+from telethon import TelegramClient, functions, errors
+# ✅ Важные импорты для 2FA/Авторизации
+from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 
 logger = logging.getLogger(__name__)
 
-class TelethonManager:
-    def __init__(self, db, config):
-        self.db = db
-        self.config = config
-        self.API_ID = config.API_ID
-        self.API_HASH = config.API_HASH
-        self.TEMP_DIR = config.TEMP_DIR
-        self.store = self.GlobalStore()
+# Класс для хранения данных сессий (ПРИМЕР)
+class SessionStore:
+    def __init__(self):
+        # Хранит активные рабочие процессы/таски для QR
+        self.active_workers = {}
+        # Хранит клиенты Telethon
+        self.clients = {}
 
-        os.makedirs(self.TEMP_DIR, exist_ok=True)
+    def get_client(self, user_id):
+        return self.clients.get(user_id)
+
+    async def create_client(self, user_id):
+        # Создание клиента: имя сессии - это ID пользователя, путь - папка sessions/
+        session_name = str(user_id)
+        client = TelegramClient(f'sessions/{session_name}', api_id=YOUR_API_ID, api_hash=YOUR_API_HASH)
+        # ⚠️ Замените YOUR_API_ID и YOUR_API_HASH на ваши реальные данные!
         
-    class GlobalStore:
-        def __init__(self):
-            self.active_workers: dict[int, TelegramClient] = {} 
-            self.temp_data: dict[int, dict] = {} 
-            self.process_progress: dict[int, str] = {}
-            self.drop_mapping: dict[str, int] = {}
-            
-    async def create_client(self, user_id: int, session_str: str = None) -> TelegramClient:
-        if user_id in self.store.active_workers:
-            client = self.store.active_workers[user_id]
-            if await client.is_connected():
-                return client
-            
-        session_file = os.path.join(self.TEMP_DIR, f"session_{user_id}.session")
+        # Если клиент еще не подключен, подключить его
+        if not client.is_connected():
+            await client.connect()
         
-        # Если передана строка сессии, используем StringSession
-        if session_str and not session_str.endswith('.session'):
-            session_arg = StringSession(session_str)
-        else:
-            session_arg = session_file
-            
-        client = TelegramClient(session_arg, self.API_ID, self.API_HASH, 
-                                device_model='AiogramBotWorker', system_version='1.0')
-        self.store.active_workers[user_id] = client
+        self.clients[user_id] = client
         return client
 
-    async def register_handlers(self, client: TelegramClient, user_id: int):
-        # Здесь должна быть логика ваших обработчиков событий Telethon
-        pass
-
-    # --- АВТОРИЗАЦИЯ ПО НОМЕРУ ---
-    async def send_code(self, user_id: int, phone: str) -> str:
-        """📱 Отправка SMS кода"""
-        client = await self.create_client(user_id)
-        self.store.temp_data[user_id] = {'client': client, 'phone': phone}
-        try:
-            await client.connect()
-            result = await client.send_code_request(phone)
-            self.store.temp_data[user_id]['phone_code_hash'] = result.phone_code_hash
-            await self.db.update_user(user_id, telethon_active=1)  
-            return "✅ Код отправлен. Введите его:"
-        except FloodWaitError as e:
-            logger.warning(f"FloodWait on send_code for {user_id}: {e}")
-            return f"❌ FloodWait: подождите {e.seconds}s"
-        except Exception as e:
-            await self.stop_worker(user_id, True)
-            return f"❌ Ошибка: {e}"
-
-    async def sign_in(self, user_id: int, code: str) -> tuple[bool, str, str | None]:
-        """🔢 Ввод SMS кода"""
-        data = self.store.temp_data.get(user_id)
-        if not data or 'client' not in data: 
-             return False, "❌ Сессия утеряна", None
+    async def delete_worker(self, user_id):
+        worker = self.active_workers.pop(user_id, None)
+        if worker:
+            worker.cancel()
         
-        client = data['client']
-        phone = data.get('phone')
-        phone_code_hash = data.get('phone_code_hash')
+    async def delete_client(self, user_id):
+        client = self.clients.pop(user_id, None)
+        if client and client.is_connected():
+            await client.log_out()
+            await client.disconnect()
+        # Удаление файла сессии
+        session_file = f'sessions/{user_id}.session'
+        if os.path.exists(session_file):
+            os.remove(session_file)
+
+
+class TelethonManager:
+    def __init__(self, api_id, api_hash):
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.store = SessionStore()
+        logger.info("TelethonManager initialized.")
+
+    def _get_client(self, user_id):
+        """Вспомогательная функция для получения или создания клиента."""
+        client = self.store.get_client(user_id)
+        if not client:
+            # ⚠️ ВНИМАНИЕ: Это должно быть асинхронным!
+            # Для простоты, если клиент не найден, вернем None и обработаем ошибку выше.
+            # В реальном коде, лучше убедиться, что клиент создан заранее или здесь.
+            raise RuntimeError(f"Client for {user_id} not initialized.") 
+        return client
+
+    async def send_code(self, user_id: int, phone: str):
+        """Отправляет код авторизации по номеру телефона."""
+        client = await self.store.create_client(user_id)
+        
+        result = await client.send_code_request(phone)
+        return result.phone_code_hash
+    
+    # ✅ ФИКС: ИСПРАВЛЕНО КОЛИЧЕСТВО АРГУМЕНТОВ
+    async def sign_in(self, user_id: int, phone: str, code_hash: str, code: str):
+        """Пытается авторизоваться, используя код и хэш."""
+        client = self.store.get_client(user_id)
+        if not client:
+            raise RuntimeError("Client is missing during sign_in.")
 
         try:
-            await client.sign_in(phone, code, phone_code_hash)
-            me = await client.get_me()
-            session_str = client.session.save() 
-            await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
-            del self.store.temp_data[user_id] 
-            return True, f"✅ Вход успешен! @{me.username}", session_str
-        except SessionPasswordNeededError:
-            return False, "⚠️ Требуется пароль 2FA", None
-        except PhoneCodeInvalidError:
-            return False, "❌ Неверный код. Попробуйте снова.", None
-        except Exception as e:
-            logger.error(f"Sign_in error for {user_id}: {e}")
-            await self.stop_worker(user_id, True)
-            return False, f"❌ Ошибка кода: {e}", None
-
-    async def sign_in_password(self, user_id: int, password: str) -> tuple[bool, str]:
-        """🔑 Ввод пароля 2FA"""
-        data = self.store.temp_data.get(user_id)
-        if not data or 'client' not in data: 
-             return False, "❌ Сессия утеряна"
+            await client.sign_in(phone, code, phone_code_hash=code_hash)
+            
+            # Авторизация успешна, удаляем рабочие процессы (если были QR)
+            await self.store.delete_worker(user_id) 
+            return "success"
         
-        client = data['client']
+        except errors.SessionPasswordNeededError:
+            # Требуется 2FA пароль
+            return "password_required"
+        except (PhoneCodeExpiredError, PhoneCodeInvalidError, errors.CodeInvalidError) as e:
+            # Неверный или истекший код
+            raise e
+        except Exception as e:
+            # Другие ошибки
+            raise e
+
+    async def check_password(self, user_id: int, password: str):
+        """Проверяет Облачный пароль (2FA)."""
+        client = self._get_client(user_id)
+        
         try:
             await client.sign_in(password=password)
-            me = await client.get_me()
-            session_str = client.session.save()
-            await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
-            del self.store.temp_data[user_id] 
-            return True, f"✅ 2FA успешен! @{me.username}"
-        except (PasswordHashInvalidError, SessionPasswordNeededError):
-            return False, "❌ Неверный пароль 2FA."
-        except Exception as e:
-            logger.error(f"Sign_in_password error for {user_id}: {e}")
-            await self.stop_worker(user_id, True)
-            return False, f"❌ Ошибка: {e}"
-
-    # --- АВТОРИЗАЦИЯ ПО QR-КОДУ (ИМИТАЦИЯ) ---
-    async def start_qr_login(self, user_id: int) -> tuple[str, str]:
-        """📱 QR авторизация (возвращает FAKE URL для QR и FAKE объект для ожидания)"""
-        client = await self.create_client(user_id)
-        self.store.temp_data[user_id] = {'client': client}
-        
-        try:
-            await client.connect()
-            # Имитация QR URL
-            fake_qr_url = f"https://t.me/login/{user_id}?token=qr_{int(time.time())}"
-            self.store.temp_data[user_id]['qr_login_data'] = {'url': fake_qr_url}
-            # Возвращаем два одинаковых строковых объекта, чтобы соответствовать сигнатуре
-            return fake_qr_url, fake_qr_url 
-        except Exception as e:
-            logger.error(f"start_qr_login error for {user_id}: {e}")
-            await self.stop_worker(user_id, True)
-            raise e
-            
-    async def check_qr_login(self, user_id: int, qr_data, client: TelegramClient) -> tuple[bool, str]:
-        """Проверка статуса QR-авторизации (Имитация)"""
-        # ✅ ИСПРАВЛЕНО: Используем жестко заданные 30 секунд
-        await asyncio.sleep(30) 
-        
-        try:
-            if await client.is_user_authorized():
-                session_str = client.session.save()
-                await self.db.update_user(user_id, telethon_active=1, session_str=session_str)
-                del self.store.temp_data[user_id]
-                return True, "✅ Успешный вход по QR-коду!"
-            else:
-                return False, "⚠️ Требуется 2FA пароль."
-
-        except FloodWaitError as e:
-            return False, f"❌ Превышен лимит: {e.seconds}s."
-        except Exception as e:
-            logger.error(f"check_qr_login error for {user_id}: {e}")
-            return False, f"❌ Ошибка ожидания QR: {e}"
-
-    # --- УПРАВЛЕНИЕ WORKER'АМИ ---
-    async def start_client_task(self, user_id: int) -> bool:
-        try:
-            user_data = await self.db.get_user(user_id)
-            session_str = user_data.get('session_str')
-            if not session_str:
-                return False
-                
-            client = await self.create_client(user_id, session_str=session_str)
-            
-            await client.connect()
-            if not await client.is_user_authorized():
-                 raise AuthKeyUnregisteredError('Session expired.')
-            
-            await self.register_handlers(client, user_id)
-            
-            # Удален блокирующий client.start()
-            
-            await self.db.update_user(user_id, telethon_active=2) 
+            await self.store.delete_worker(user_id) 
             return True
-            
-        except AuthKeyUnregisteredError:
-            await self.stop_worker(user_id, delete_session=True)
-            await self.db.update_user(user_id, telethon_active=0)
-            return False
-        except Exception as e: 
-            logger.error(f"Start client error {user_id}: {e}", exc_info=True)
-            await self.stop_worker(user_id, delete_session=True)
-            return False
+        except errors.PasswordHashInvalidError:
+            raise ValueError("Неверный 2FA пароль.")
+        except Exception as e:
+            raise e
 
-    async def stop_worker(self, user_id: int, delete_session: bool = False):
-        if user_id in self.store.active_workers:
-            client = self.store.active_workers[user_id]
-            
-            try:
-                if await client.is_connected():
-                    await client.disconnect()
-            except Exception:
-                pass 
+    async def start_qr_login(self, user_id: int):
+        """Инициализирует процесс QR-авторизации."""
+        client = await self.store.create_client(user_id)
+        
+        # Запуск рабочего процесса для QR-авторизации
+        qr_login = await client.qr_login()
+        
+        # Сохраняем QR-объект в worker, чтобы можно было проверить статус
+        self.store.active_workers[user_id] = qr_login
+        
+        # Возвращаем URL и сам объект
+        return qr_login.url, qr_login
+        
+    # --- ДОПОЛНИТЕЛЬНЫЙ МЕТОД: ПРОВЕРКА СТАТУСА QR (если требуется) ---
+    async def check_qr_status(self, user_id: int):
+        """Проверяет статус QR-сессии."""
+        qr_login = self.store.active_workers.get(user_id)
+        if not qr_login:
+            return "expired"
 
-            del self.store.active_workers[user_id]
-            
-            self.store.temp_data.pop(user_id, None) 
-            self.store.process_progress.pop(user_id, None)
-
-            if delete_session:
-                session_file = os.path.join(self.TEMP_DIR, f"session_{user_id}.session")
-                if os.path.exists(session_file):
-                    os.remove(session_file)
-                await self.db.update_user(user_id, telethon_active=0, session_str=None)
-            else:
-                 await self.db.update_user(user_id, telethon_active=1) 
-        else:
-             if delete_session:
-                 await self.db.update_user(user_id, telethon_active=0, session_str=None)
-
-    async def process_pc_start(self, user_id: int, message_obj, pc_name: str) -> str:
-        chat_id = message_obj.chat.id
-        self.store.drop_mapping[pc_name] = chat_id
-        await self.db.update_drop_session(user_id, pc_name, phone=None) 
-        return f"✅ ПК **{pc_name}** привязан к чату **{chat_id}**"
+        try:
+            await qr_login.wait(timeout=0) # Не ждем, просто проверяем статус
+            # Если не вызвало исключения, авторизация завершилась (или требует пароль)
+            return "completed" 
+        except errors.SessionPasswordNeededError:
+            return "password_required"
+        except asyncio.TimeoutError:
+            return "waiting" # Все еще ждем сканирования
+        except errors.QRLoginExpired:
+            # Ошибка, что сессия истекла
+            await self.store.delete_worker(user_id)
+            return "expired"
+        except Exception as e:
+            logger.error(f"Error checking QR status for {user_id}: {e}")
+            await self.store.delete_worker(user_id)
+            return "error"
